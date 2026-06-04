@@ -1,0 +1,75 @@
+name: _reusable · issue-close completeness guard
+
+# Reopens an issue closed as COMPLETED while it still has unchecked
+# acceptance/test checkboxes — so issues can't be marked done with open items.
+# Escape hatches: close as "not planned" (state_reason=not_planned), or add a
+# `force-close`/`wontfix` label. Exempt sections (Out of scope / Blocked by /
+# Reverse-if-wrong / Candidate / Further notes) are NOT counted.
+#
+# Caller (per repo) — `on: issues: [closed]`, grant `issues: write`, pass the
+# runner per the tier policy (public → ubuntu-latest; private → ARC pool):
+#   jobs:
+#     guard:
+#       uses: githumps/infra-public/.github/workflows/_reusable.issue-close-completeness.yml@<sha>
+#       with: { runner: arc-infrastructure }   # omit for public (ubuntu-latest)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner. Public repos: ubuntu-latest (default). Private repos: their ARC pool (GH-hosted is billable on private)."
+        required: false
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  issues: write
+
+jobs:
+  check-completeness:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (issue.state_reason && issue.state_reason !== 'completed') {
+              core.info(`closed as ${issue.state_reason} — allowed`);
+              return;
+            }
+            const labels = (issue.labels || []).map(l => (l.name || '').toLowerCase());
+            if (labels.includes('force-close') || labels.includes('wontfix')) {
+              core.info('force-close/wontfix label present — allowed');
+              return;
+            }
+            const body = issue.body || '';
+            const exempt = /out of scope|blocked by|reverse-if-wrong|candidate|further notes|notes$/i;
+            let skipping = false;
+            const open = [];
+            for (const raw of body.split('\n')) {
+              const line = raw.trim();
+              if (/^#{1,6}\s+/.test(line) || /^\*\*[^*]+\*\*\s*$/.test(line)) {
+                skipping = exempt.test(line.replace(/[#*]/g, '').trim());
+                continue;
+              }
+              if (!skipping && /^[-*]\s+\[\s\]\s+/.test(line)) {
+                open.push(line.replace(/^[-*]\s+\[\s\]\s+/, '').slice(0, 100));
+              }
+            }
+            if (open.length === 0) {
+              core.info('no open acceptance/test items — close stands');
+              return;
+            }
+            await github.rest.issues.update({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: issue.number, state: 'open',
+            });
+            const list = open.map(i => `- [ ] ${i}`).join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `🚧 **Reopened by the close-completeness guard** — closed as *completed* but still has ${open.length} unchecked item(s):\n\n${list}\n\n` +
+                `Finish + check them, or close it **as "not planned"** / add a \`force-close\` label. Exempt sections (Out of scope / Blocked by / Reverse-if-wrong / Candidate / Further notes) aren't counted.`,
+            });
+            core.warning(`reopened #${issue.number} — ${open.length} unchecked item(s)`);
