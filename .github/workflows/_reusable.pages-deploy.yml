@@ -2,7 +2,7 @@ name: Reusable · Deploy to GitHub Pages
 
 # Shared GitHub Pages publish. Replaces the inline
 # configure-pages -> upload-pages-artifact -> deploy-pages trio duplicated
-# across static-site repos (brother-claudius, conducted, ...). The CALLER
+# across static-site repos. The CALLER
 # grants the Pages permissions (a reusable can't elevate beyond the caller's
 # GITHUB_TOKEN); this workflow runs the standard publish on a native runner.
 # All actions SHA-pinned per the infra-public standard.
