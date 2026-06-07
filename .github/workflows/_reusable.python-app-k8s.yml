@@ -1,0 +1,172 @@
+name: _reusable · Python app for k8s (lint/test + multi-arch image)
+
+# The single standard for a Python service that ships as a container to a
+# Kubernetes cluster. ONE entrypoint that composes the existing building blocks:
+#
+#   1. python-check          — ruff (lint + format) + uv + pytest
+#   2. container-build-multiarch — NATIVE amd64 + arm64 (no QEMU), manifest list
+#
+# WHY multi-arch is the default (not opt-in): k8s clusters are increasingly ARM
+# (e.g. OCI A1.Flex / Graviton / Apple-silicon nodes). A single-arch amd64 image
+# silently cannot schedule onto an arm64 node — the pod just never starts, and
+# the cause (image arch) is non-obvious. Building both arches every time removes
+# the whole class of "works on my x86 builder, won't run on the ARM cluster"
+# failure. On a pull_request (push=false) BOTH arches are *built* (not pushed),
+# so an arm64-breaking change fails the PR instead of a deploy.
+#
+# Consume cross-repo, SHA-pinned:
+#   jobs:
+#     ship:
+#       uses: githumps/infra-public/.github/workflows/_reusable.python-app-k8s.yml@<sha>
+#       permissions: { contents: read, packages: write, id-token: write }
+#       with:
+#         image: ghcr.io/${{ github.repository }}
+#         tag: ${{ github.sha }}
+#         push: ${{ github.event_name != 'pull_request' }}
+#       secrets: inherit
+#
+# CALLER MUST GRANT: permissions: { contents: read, packages: write, id-token: write }
+# (a reusable that declares a permission the caller hasn't granted fails at startup).
+
+on:
+  workflow_call:
+    inputs:
+      # ── image / build ──
+      image:
+        description: "Image repo path WITHOUT tag (e.g. ghcr.io/owner/repo). With registry-type=ecr + the `registry` secret, a bare repo-path."
+        required: true
+        type: string
+      tag:
+        description: "Tag for the final manifest list (e.g. the commit SHA)."
+        required: true
+        type: string
+      dockerfile:
+        required: false
+        type: string
+        default: "Dockerfile"
+      context:
+        required: false
+        type: string
+        default: "."
+      target:
+        description: "Optional Dockerfile build stage. Passed through build-args is not enough for multi-stage targets, so it's surfaced here. Empty = final stage."
+        required: false
+        type: string
+        default: ""
+      build-args:
+        required: false
+        type: string
+        default: ""
+      push:
+        description: "Push + assemble the manifest. Set false on pull_request to validate BOTH arches build without publishing."
+        required: false
+        type: boolean
+        default: true
+      registry-type:
+        description: "ghcr (default, the org standard) | ecr | none"
+        required: false
+        type: string
+        default: "ghcr"
+      aws-region:
+        required: false
+        type: string
+        default: "us-east-1"
+      amd64-runner:
+        description: "Runner for the native amd64 build. Override for a self-hosted/ARC amd64 pool (private repos avoiding GitHub-hosted minutes)."
+        required: false
+        type: string
+        default: "ubuntu-24.04"
+      arm64-runner:
+        description: "Runner for the native arm64 build. Override for a self-hosted/ARC arm64 pool."
+        required: false
+        type: string
+        default: "ubuntu-24.04-arm"
+      # ── lint / test ──
+      run-check:
+        description: "Run the ruff+pytest check before building. Build is gated on it passing."
+        required: false
+        type: boolean
+        default: true
+      check-runner:
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      working-directory:
+        required: false
+        type: string
+        default: "."
+      python-version:
+        description: "Optional UV_PYTHON override. Empty = the project's .python-version / pyproject."
+        required: false
+        type: string
+        default: ""
+      install-cmd:
+        required: false
+        type: string
+        default: "uv sync --frozen"
+      ruff:
+        required: false
+        type: boolean
+        default: true
+      use-uv-run:
+        required: false
+        type: boolean
+        default: true
+      lint-paths:
+        required: false
+        type: string
+        default: "."
+      test-cmd:
+        required: false
+        type: string
+        default: "uv run pytest -q"
+    secrets:
+      role_to_assume:
+        description: "IAM role ARN for ECR push via OIDC (registry-type=ecr)."
+        required: false
+      registry:
+        description: "ECR host to prepend to `image` (registry-type=ecr). Omit for GHCR/full refs."
+        required: false
+    outputs:
+      digest:
+        description: "Manifest-list digest (sha256:...); empty when push=false."
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write   # GHCR push
+  id-token: write   # ECR OIDC
+
+jobs:
+  check:
+    if: ${{ inputs.run-check }}
+    uses: ./.github/workflows/_reusable.python-check.yml
+    with:
+      runner: ${{ inputs.check-runner }}
+      working-directory: ${{ inputs.working-directory }}
+      python-version: ${{ inputs.python-version }}
+      install-cmd: ${{ inputs.install-cmd }}
+      ruff: ${{ inputs.ruff }}
+      use-uv-run: ${{ inputs.use-uv-run }}
+      lint-paths: ${{ inputs.lint-paths }}
+      test-cmd: ${{ inputs.test-cmd }}
+
+  build:
+    needs: [check]
+    # Build after the check passes; still build when the check is intentionally
+    # skipped (run-check=false). Skip only when the check actually FAILED.
+    if: ${{ always() && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
+    uses: ./.github/workflows/_reusable.container-build-multiarch.yml
+    with:
+      image: ${{ inputs.image }}
+      tag: ${{ inputs.tag }}
+      dockerfile: ${{ inputs.dockerfile }}
+      context: ${{ inputs.context }}
+      target: ${{ inputs.target }}
+      push: ${{ inputs.push }}
+      registry-type: ${{ inputs.registry-type }}
+      aws-region: ${{ inputs.aws-region }}
+      amd64-runner: ${{ inputs.amd64-runner }}
+      arm64-runner: ${{ inputs.arm64-runner }}
+      build-args: ${{ inputs.build-args }}
+    secrets: inherit
