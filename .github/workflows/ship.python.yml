@@ -17,7 +17,7 @@ name: _reusable · Python app for k8s (lint/test + multi-arch image)
 # Consume cross-repo, SHA-pinned:
 #   jobs:
 #     ship:
-#       uses: githumps/infra-public/.github/workflows/_reusable.python-app-k8s.yml@<sha>
+#       uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
 #       permissions: { contents: read, packages: write, id-token: write }
 #       with:
 #         image: ghcr.io/${{ github.repository }}
@@ -140,7 +140,7 @@ permissions:
 jobs:
   check:
     if: ${{ inputs.run-check }}
-    uses: ./.github/workflows/_reusable.python-check.yml
+    uses: ./.github/workflows/check.python.yml
     with:
       runner: ${{ inputs.check-runner }}
       working-directory: ${{ inputs.working-directory }}
@@ -156,7 +156,7 @@ jobs:
     # Build after the check passes; still build when the check is intentionally
     # skipped (run-check=false). Skip only when the check actually FAILED.
     if: ${{ always() && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
-    uses: ./.github/workflows/_reusable.container-build-multiarch.yml
+    uses: ./.github/workflows/build.container-multiarch.yml
     with:
       image: ${{ inputs.image }}
       tag: ${{ inputs.tag }}

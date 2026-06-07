@@ -12,7 +12,7 @@ name: _reusable · Python check (ruff + pytest)
 # Caller picks `runner` to match its tier: a GitHub-hosted runner
 # (ubuntu-latest) for public repos, or a self-hosted/ARC pool otherwise.
 # Consumed cross-repo as
-# `uses: githumps/infra-public/.github/workflows/_reusable.python-check.yml@<sha>`.
+# `uses: githumps/infra-public/.github/workflows/check.python.yml@<sha>`.
 # All actions SHA-pinned.
 
 on:
