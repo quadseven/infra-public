@@ -33,6 +33,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ${{ inputs.runs_on }}
+    # GitHub's default job timeout is 360 min (6h). Pages publishes take <2 min;
+    # cap here because callers use a `uses:` job and can't set timeout-minutes.
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
