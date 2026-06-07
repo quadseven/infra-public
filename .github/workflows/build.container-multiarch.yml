@@ -6,7 +6,7 @@ name: _reusable · Container build (multi-arch, native, no QEMU)
 # manifest list under image:tag. Standard buildx "distribute across runners"
 # pattern. Registry: GHCR (GITHUB_TOKEN) or ECR (OIDC + `registry` secret).
 # Consumed cross-repo as
-# uses: githumps/infra-public/.github/workflows/_reusable.container-build-multiarch.yml@<sha>
+# uses: githumps/infra-public/.github/workflows/build.container-multiarch.yml@<sha>
 # All actions SHA-pinned.
 # CALLER MUST GRANT these permissions (a reusable that declares a permission
 # the caller hasn't granted fails at STARTUP):

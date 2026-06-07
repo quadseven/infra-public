@@ -8,7 +8,7 @@ name: _reusable · temper verify (spec cascade)
 #
 # Caller passes the pinned `temper-repo-sha` (the binary version) + its
 # `runner`. Consumed cross-repo as
-# `uses: githumps/infra-public/.github/workflows/_reusable.temper-verify.yml@<sha>`.
+# `uses: githumps/infra-public/.github/workflows/verify.temper.yml@<sha>`.
 # All actions SHA-pinned.
 
 on:

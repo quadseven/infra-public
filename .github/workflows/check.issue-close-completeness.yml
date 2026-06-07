@@ -10,7 +10,7 @@ name: _reusable · issue-close completeness guard
 # runner per the tier policy (public → ubuntu-latest; private → ARC pool):
 #   jobs:
 #     guard:
-#       uses: githumps/infra-public/.github/workflows/_reusable.issue-close-completeness.yml@<sha>
+#       uses: githumps/infra-public/.github/workflows/check.issue-close-completeness.yml@<sha>
 #       with: { runner: arc-infrastructure }   # omit for public (ubuntu-latest)
 
 on:

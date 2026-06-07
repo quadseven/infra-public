@@ -34,7 +34,7 @@ permissions:
   id-token: write   # ECR-OIDC path (declared by the reusable; grant even for GHCR)
 jobs:
   ship:
-    uses: githumps/infra-public/.github/workflows/_reusable.python-app-k8s.yml@<sha>
+    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
     with:
       image: ghcr.io/${{ github.repository }}
       tag: ${{ github.sha }}
@@ -52,13 +52,13 @@ Call it once per target. Each produces its own multi-arch manifest:
 ```yaml
 jobs:
   web:
-    uses: githumps/infra-public/.github/workflows/_reusable.python-app-k8s.yml@<sha>
+    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
     with: { image: ghcr.io/${{ github.repository }}-web, tag: ${{ github.sha }}, target: web,
             push: "${{ github.event_name != 'pull_request' }}" }
     secrets: inherit
   worker:
     needs: [web]   # share the build cache / avoid double ruff+pytest: set run-check:false here
-    uses: githumps/infra-public/.github/workflows/_reusable.python-app-k8s.yml@<sha>
+    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
     with: { image: ghcr.io/${{ github.repository }}-worker, tag: ${{ github.sha }}, target: worker,
             run-check: false, push: "${{ github.event_name != 'pull_request' }}" }
     secrets: inherit
@@ -78,8 +78,8 @@ jobs:
 
 ## What it composes
 
-- [`_reusable.python-check.yml`](./_reusable.python-check.yml) — ruff (lint + `format --check`) + uv + pytest.
-- [`_reusable.container-build-multiarch.yml`](./_reusable.container-build-multiarch.yml) — native amd64 + arm64 (no QEMU), per-arch push-by-digest, manifest-list merge.
+- [`check.python.yml`](./check.python.yml) — ruff (lint + `format --check`) + uv + pytest.
+- [`build.container-multiarch.yml`](./build.container-multiarch.yml) — native amd64 + arm64 (no QEMU), per-arch push-by-digest, manifest-list merge.
 
 Prefer **GHCR** over a self-hosted in-cluster registry: it's free for the org,
 natively multi-arch, and removes a stateful component from the cluster.
