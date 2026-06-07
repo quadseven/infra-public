@@ -51,6 +51,21 @@ on:
         required: false
         type: string
         default: ""
+      target:
+        description: "Optional Dockerfile build stage (multi-stage builds). Empty = final stage."
+        required: false
+        type: string
+        default: ""
+      amd64-runner:
+        description: "Runner label(s) for the native amd64 build. Default GitHub-hosted; override for a self-hosted/ARC amd64 pool."
+        required: false
+        type: string
+        default: "ubuntu-24.04"
+      arm64-runner:
+        description: "Runner label(s) for the native arm64 build. Default GitHub-hosted arm64; override for a self-hosted/ARC arm64 pool."
+        required: false
+        type: string
+        default: "ubuntu-24.04-arm"
     secrets:
       role_to_assume:
         description: "IAM role ARN for ECR push via OIDC (registry-type=ecr)."
@@ -74,8 +89,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux/amd64, runner: ubuntu-24.04,     arch: amd64, host: x86_64 }
-          - { platform: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64, host: aarch64 }
+          - { platform: linux/amd64, runner: "${{ inputs.amd64-runner }}", arch: amd64, host: x86_64 }
+          - { platform: linux/arm64, runner: "${{ inputs.arm64-runner }}", arch: arm64, host: aarch64 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -115,6 +130,7 @@ jobs:
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
           platforms: ${{ matrix.platform }}
           build-args: ${{ inputs.build-args }}
           provenance: false
