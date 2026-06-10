@@ -95,7 +95,7 @@ jobs:
           git clone "https://github.com/${TEMPER_REPO}.git" /tmp/temper
           cd /tmp/temper
           git checkout "$TEMPER_REPO_SHA"
-          cargo build --release --bin temper
+          cargo build --release --locked --bin temper
 
       - name: "Verify all spec directories"
         env:
