@@ -185,7 +185,9 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC2046
-          docker buildx imagetools create -t "${IMAGE_REF}:${TAG}" $(printf '%s@sha256:%s ' "$IMAGE_REF" *)
+          refs=""
+          for d in *; do refs="$refs ${IMAGE_REF}@sha256:${d}"; done
+          docker buildx imagetools create -t "${IMAGE_REF}:${TAG}" $refs
           digest=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "✓ pushed manifest ${IMAGE_REF}:${TAG} (${digest})"
