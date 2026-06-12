@@ -78,6 +78,11 @@ jobs:
       UV_PYTHON: ${{ inputs.python-version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        # Don't leave GITHUB_TOKEN in .git/config: this job then runs
+        # caller-controlled install-cmd / test-cmd (pytest), which would
+        # otherwise be able to read the persisted token. Lint/test need no git auth.
+        with:
+          persist-credentials: false
       # Pin the interpreter for system-install repos (use-uv-run:false): their
       # `uv pip install --system` targets the active Python, so without this the
       # runner's default version is used (e.g. ubuntu-latest's 3.12) instead of
