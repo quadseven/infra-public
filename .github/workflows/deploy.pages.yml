@@ -42,6 +42,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Pages publishes via the OIDC/id-token flow (configure/upload/deploy-pages),
+          # never git-over-HTTPS — so don't persist GITHUB_TOKEN in .git/config (#12).
+          persist-credentials: false
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
       - name: Upload static site
