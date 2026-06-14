@@ -40,7 +40,11 @@ permissions:
 jobs:
   verify:
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 25
+    # 40min, not 25 (#9): the cold path (GH-hosted, no baked binary) must
+    # apt-install libz3-dev/libclang-dev, clone temper, and `cargo build
+    # --release` — a from-scratch arm64 Rust build can exceed 25min and time out.
+    # The warm path (baked binary present) still finishes in seconds.
+    timeout-minutes: 40
     env:
       # Passed via env (not ${{ }} in run:) so caller inputs can't inject shell.
       TEMPER_REPO: ${{ inputs.temper-repo }}
@@ -92,7 +96,12 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf /tmp/temper
-          git clone "https://github.com/${TEMPER_REPO}.git" /tmp/temper
+          # Blobless partial clone (#14): fetch commits + trees but NOT historical
+          # blobs; `git checkout <sha>` then lazily fetches only the blobs for that
+          # one commit's tree. We compile a single pinned SHA, so downloading the
+          # whole repo's blob history is pure waste on the cold path. Still works
+          # for an arbitrary SHA (all refs/commits are present).
+          git clone --filter=blob:none "https://github.com/${TEMPER_REPO}.git" /tmp/temper
           cd /tmp/temper
           git checkout "$TEMPER_REPO_SHA"
           cargo build --release --locked --bin temper

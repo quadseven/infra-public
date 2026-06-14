@@ -115,6 +115,10 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Don't persist GITHUB_TOKEN in .git/config — the build/push uses the
+          # registry credential, never git-over-HTTPS to the caller repo (#10).
+          persist-credentials: false
 
       - name: "Guard: native CPU match (no QEMU)"
         env:
