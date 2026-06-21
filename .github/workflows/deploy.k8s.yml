@@ -44,6 +44,17 @@ on:
         required: false
         type: string
         default: "ubuntu-24.04-arm"
+      environment:
+        description: |
+          Optional GitHub deployment environment for the deploy job. Set this when the
+          OIDC role's trust is scoped to an environment subject
+          (sub=repo:OWNER/REPO:environment:NAME) rather than a branch ref. A `uses:`
+          (reusable-call) job in the CALLER cannot set `environment`, so the subject is
+          fixed here instead. Default "" = no environment (subject is the branch ref,
+          the common case).
+        required: false
+        type: string
+        default: ""
       timeout-minutes:
         description: "Job timeout."
         required: false
@@ -186,6 +197,10 @@ permissions:
 jobs:
   deploy:
     name: Build + deploy ${{ inputs.service-name }} to k8s
+    # Empty string = no environment (subject is the branch ref). Set by callers
+    # whose OIDC role trust is scoped to an environment subject (e.g. aws-verify
+    # for pre-merge branch verification of SSM-seeding deploys).
+    environment: ${{ inputs.environment }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
