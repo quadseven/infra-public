@@ -75,8 +75,43 @@ A frontend-bundling or shared-vendoring service adds a pre-build hook:
 | `smoke-pod-name` / `smoke-curl-cmd` | `""` | optional one-shot curl probe of the in-cluster Service |
 | `registry-pull-secret` | `registry-pull` | docker-registry imagePullSecret seeded in the namespace |
 | `tailnet-tag` | `tag:ci` | ACL tag for the ephemeral CI join |
+| `seed-app-secrets` | `false` | if true, OIDC -> read SSM + literals -> delete-then-create the app Secret before rollout |
+| `app-secret-name` | `""` | the Secret to seed; required when `seed-app-secrets` |
+| `ssm-secrets` | `""` | newline `KEY=/ssm/path` pairs, read with-decryption (private paths arrive here, never hardcoded) |
+| `extra-secrets` | `""` | newline `KEY=value` literals appended to the Secret (e.g. Cognito ids) |
+| `aws-region` | `us-east-1` | region for the SSM reads |
+| `run-migrate` | `false` | if true, apply `migrate-manifest` as a Job + wait for completion before rollout |
+| `migrate-manifest` / `migrate-job-name` | `""` | the migrate Job manifest path + name; required when `run-migrate` |
+| `migrate-timeout` | `300s` | `kubectl wait --for=condition=complete` timeout |
 
-Secrets: `registry-username`, `registry-password`, `ts-authkey`, `kubeconfig-b64`.
+Secrets: `registry-username`, `registry-password`, `ts-authkey`, `kubeconfig-b64`,
+and `aws-role-arn` (OIDC role for the SSM reads; passed as a secret so the
+account-id-bearing ARN stays masked; required when `seed-app-secrets`).
+
+A migrate/secret-seeding caller grants `id-token: write` (OIDC) in addition to
+`contents: read`:
+
+```yaml
+jobs:
+  deploy:
+    permissions: { contents: read, id-token: write }
+    uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>
+    with:
+      # ... build/deploy inputs ...
+      seed-app-secrets: true
+      app-secret-name: <secret>
+      ssm-secrets: |
+        DB_URL=/path/to/db-url
+        API_KEY=/path/to/api-key
+      extra-secrets: |
+        SOME_ID=${{ vars.SOME_ID }}
+      run-migrate: true
+      migrate-manifest: <dir>/migrate-job.yaml
+      migrate-job-name: <service>-migrate
+    secrets:
+      # ... + ...
+      aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+```
 
 ## Cluster invariants the manifests must hold
 
@@ -91,8 +126,10 @@ Secrets: `registry-username`, `registry-password`, `ts-authkey`, `kubeconfig-b64
   the rollout diagnostics can read the crash reason over the apiserver when
   `kubectl logs` to the node is blocked.
 
-## Not covered (yet)
+## Secret handling
 
-Alembic/migrate Jobs and seeding app-config secrets from a cloud secret store
-are intentionally out of scope until a caller needs them and a verified path is
-added here. Keep those caller-side for now.
+The SSM-seed reads values at runtime into a 0600 env-file and never echoes them
+(`set +x`); only the SSM *paths* (not values) live in the caller's `ssm-secrets`
+input. The Secret is delete-then-created (not `apply`-merged) so a changed key
+set never leaves stale data. The OIDC role ARN is a `secret`, not an input, so
+it stays masked.

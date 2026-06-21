@@ -29,9 +29,12 @@ name: _reusable - k8s deploy (native build -> rollout -> smoke)
 # All actions SHA-pinned. Consumed cross-repo as
 # `uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>`.
 #
-# NOT yet covered (add as a follow-up when the first caller needs it):
-# alembic/migrate Jobs and seeding app-config secrets from a cloud
-# secret store. Keep those caller-side until a verified path exists here.
+# Optional, default-off stages (a caller that doesn't set them is unaffected):
+#   - seed-app-secrets: OIDC -> read SSM params (with-decryption) + literal
+#     pairs -> delete-then-create a k8s Secret before rollout. Values are read
+#     at runtime via env-file, never echoed; SSM paths arrive via inputs.
+#   - run-migrate: apply a migrate Job manifest and wait for completion BEFORE
+#     rollout (e.g. alembic upgrade head), with failure log/describe dump.
 
 on:
   workflow_call:
@@ -114,6 +117,51 @@ on:
         required: false
         type: string
         default: ""
+      seed-app-secrets:
+        description: "If true, read SSM params + literals and (re)create the app-config Secret before rollout. Requires the aws-role-arn secret + ssm-secrets/extra-secrets."
+        required: false
+        type: boolean
+        default: false
+      app-secret-name:
+        description: "Name of the app-config Secret to seed (delete-then-create from an env-file). Required when seed-app-secrets is true."
+        required: false
+        type: string
+        default: ""
+      aws-region:
+        description: "AWS region for the SSM reads."
+        required: false
+        type: string
+        default: "us-east-1"
+      ssm-secrets:
+        description: "Newline-separated KEY=/ssm/path pairs; each value is read with-decryption into the Secret. Private paths arrive here (never hardcoded)."
+        required: false
+        type: string
+        default: ""
+      extra-secrets:
+        description: "Newline-separated KEY=value literal pairs (non-SSM, e.g. Cognito ids) appended to the Secret."
+        required: false
+        type: string
+        default: ""
+      run-migrate:
+        description: "If true, apply the migrate-manifest as a Job and wait for completion BEFORE rollout (e.g. alembic upgrade head)."
+        required: false
+        type: boolean
+        default: false
+      migrate-manifest:
+        description: "Path to the migrate Job manifest (applied via kubectl apply -f, also placeholder-pinned). Required when run-migrate is true."
+        required: false
+        type: string
+        default: ""
+      migrate-job-name:
+        description: "Job name for the delete/wait/delete lifecycle. Required when run-migrate is true."
+        required: false
+        type: string
+        default: ""
+      migrate-timeout:
+        description: "`kubectl wait --for=condition=complete` timeout for the migrate Job."
+        required: false
+        type: string
+        default: "300s"
     secrets:
       registry-username:
         description: "Registry username for docker login + the registry-pull secret."
@@ -127,9 +175,13 @@ on:
       kubeconfig-b64:
         description: "base64-encoded kubeconfig for the target cluster."
         required: true
+      aws-role-arn:
+        description: "IAM role ARN to assume (OIDC) for the SSM reads. Passed as a secret so the account-id-bearing ARN stays masked in logs. Required when seed-app-secrets is true."
+        required: false
 
 permissions:
   contents: read
+  id-token: write   # OIDC for the optional SSM app-secret seed (configure-aws-credentials)
 
 jobs:
   deploy:
@@ -221,19 +273,89 @@ jobs:
             --docker-password="$REGISTRY_PASSWORD" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Configure AWS credentials (SSM reads)
+        if: inputs.seed-app-secrets
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Seed app-config secret from SSM
+        if: inputs.seed-app-secrets
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          SECRET_NAME: ${{ inputs.app-secret-name }}
+          SSM_SECRETS: ${{ inputs.ssm-secrets }}
+          EXTRA_SECRETS: ${{ inputs.extra-secrets }}
+        run: |
+          set -euo pipefail
+          set +x  # never echo secret values
+          [[ -n "$SECRET_NAME" ]] || { echo "::error::seed-app-secrets true but app-secret-name empty"; exit 1; }
+          ENVF="$RUNNER_TEMP/app-secrets.env"
+          install -m 600 /dev/null "$ENVF"
+          # SSM-sourced (KEY=/ssm/path), read with-decryption.
+          if [[ -n "$SSM_SECRETS" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              key="${line%%=*}"; path="${line#*=}"
+              val="$(aws ssm get-parameter --name "$path" --with-decryption --query 'Parameter.Value' --output text)"
+              printf '%s=%s\n' "$key" "$val" >> "$ENVF"
+            done <<< "$SSM_SECRETS"
+          fi
+          # Literal (KEY=value), non-SSM (e.g. Cognito ids).
+          if [[ -n "$EXTRA_SECRETS" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              printf '%s\n' "$line" >> "$ENVF"
+            done <<< "$EXTRA_SECRETS"
+          fi
+          # Delete-then-create: `kubectl apply` MERGES secret data, leaving
+          # stale keys when the shape changes; delete first for a clean state.
+          kubectl -n "$NAMESPACE" delete secret "$SECRET_NAME" --ignore-not-found
+          kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" --from-env-file="$ENVF"
+          rm -f "$ENVF"
+
       - name: Pin image placeholders
         env:
           REGISTRY_HOST: ${{ inputs.registry-host }}
           KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+          MIGRATE_MANIFEST: ${{ inputs.migrate-manifest }}
         run: |
           set -euo pipefail
+          # Pin the kustomize dir + (if set) the migrate manifest, which is
+          # applied via `kubectl apply -f` (not kustomize) so it needs its own
+          # placeholder substitution.
+          targets=("$KUSTOMIZE_DIR"/*.yaml)
+          [[ -n "$MIGRATE_MANIFEST" ]] && targets+=("$MIGRATE_MANIFEST")
           sed -i \
             -e "s|REGISTRY_PLACEHOLDER|$REGISTRY_HOST|g" \
             -e "s|TAG_PLACEHOLDER|${GITHUB_SHA}|g" \
-            "$KUSTOMIZE_DIR"/*.yaml
-          if grep -rn 'REGISTRY_PLACEHOLDER\|TAG_PLACEHOLDER' "$KUSTOMIZE_DIR"/; then
-            echo "::error::unsubstituted placeholder in $KUSTOMIZE_DIR"; exit 1
+            "${targets[@]}"
+          if grep -rn 'REGISTRY_PLACEHOLDER\|TAG_PLACEHOLDER' "${targets[@]}"; then
+            echo "::error::unsubstituted placeholder after pin"; exit 1
           fi
+
+      - name: Run migrate Job (before rollout)
+        if: inputs.run-migrate
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          MIGRATE_MANIFEST: ${{ inputs.migrate-manifest }}
+          MIGRATE_JOB: ${{ inputs.migrate-job-name }}
+          MIGRATE_TIMEOUT: ${{ inputs.migrate-timeout }}
+        run: |
+          set -euo pipefail
+          [[ -n "$MIGRATE_MANIFEST" && -n "$MIGRATE_JOB" ]] || { echo "::error::run-migrate true but migrate-manifest/migrate-job-name empty"; exit 1; }
+          # Completed Jobs are immutable -> delete any prior run before apply.
+          kubectl -n "$NAMESPACE" delete job "$MIGRATE_JOB" --ignore-not-found
+          kubectl apply -f "$MIGRATE_MANIFEST"
+          if ! kubectl -n "$NAMESPACE" wait --for=condition=complete "job/$MIGRATE_JOB" --timeout="$MIGRATE_TIMEOUT"; then
+            echo "::error::migrate job did not complete - dumping logs"
+            kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=200 || true
+            kubectl -n "$NAMESPACE" describe "job/$MIGRATE_JOB" || true
+            exit 1
+          fi
+          kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=50 || true
+          kubectl -n "$NAMESPACE" delete job "$MIGRATE_JOB"
 
       - name: Apply manifests + rollout gate
         env:
