@@ -293,19 +293,28 @@ jobs:
           [[ -n "$SECRET_NAME" ]] || { echo "::error::seed-app-secrets true but app-secret-name empty"; exit 1; }
           ENVF="$RUNNER_TEMP/app-secrets.env"
           install -m 600 /dev/null "$ENVF"
-          # SSM-sourced (KEY=/ssm/path), read with-decryption.
+          # SSM-sourced (KEY=/ssm/path), read with-decryption. An empty
+          # fetched value is a misconfig (param missing-but-empty, or an
+          # unset var feeding the path) -> fail fast rather than seed a
+          # blank value into the Secret.
           if [[ -n "$SSM_SECRETS" ]]; then
             while IFS= read -r line; do
               [[ -z "$line" ]] && continue
               key="${line%%=*}"; path="${line#*=}"
               val="$(aws ssm get-parameter --name "$path" --with-decryption --query 'Parameter.Value' --output text)"
+              [[ -n "$val" ]] || { echo "::error::ssm-secret $key resolved empty (path $path)"; exit 1; }
               printf '%s=%s\n' "$key" "$val" >> "$ENVF"
             done <<< "$SSM_SECRETS"
           fi
-          # Literal (KEY=value), non-SSM (e.g. Cognito ids).
+          # Literal (KEY=value), non-SSM (e.g. Cognito ids). An empty value
+          # (e.g. an unset caller var) is a misconfig -> fail fast; this
+          # restores the per-caller required-vars preflight the hand-written
+          # workflows had before they became thin callers.
           if [[ -n "$EXTRA_SECRETS" ]]; then
             while IFS= read -r line; do
               [[ -z "$line" ]] && continue
+              key="${line%%=*}"; val="${line#*=}"
+              [[ -n "$val" ]] || { echo "::error::extra-secret $key has an empty value"; exit 1; }
               printf '%s\n' "$line" >> "$ENVF"
             done <<< "$EXTRA_SECRETS"
           fi
