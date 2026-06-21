@@ -1,0 +1,286 @@
+name: _reusable - k8s deploy (native build -> rollout -> smoke)
+
+# Reusable build-and-deploy for a container shipping to a Kubernetes
+# cluster from a private registry. One workflow_call replaces the
+# hand-copied per-service deploy boilerplate: ephemeral tailnet join,
+# native (no-QEMU) build + push, registry-pull secret seed, image
+# placeholder pin + post-sed sentinel, `kubectl apply -k`, a rollout gate
+# with self-explaining failure diagnostics, and an optional in-cluster
+# smoke probe.
+#
+# GENERIC BY CONTRACT: every cluster/service-specific value (namespace,
+# service name, image repo, registry host, kustomize dir, smoke command)
+# arrives via inputs/secrets. This workflow hardcodes NO private-infra
+# identifier so it is safe to host in a public repo.
+#
+# Pre-build hook: `node-version` + `prebuild-run` let a caller install a
+# toolchain and run a service-specific build step (e.g. bundle a frontend,
+# vendor a shared module) into the build context before `docker build`.
+# `prebuild-run` is passed via an env var (never interpolated into a
+# `run:` script) so it is not a template-injection surface.
+#
+# BYON note: the rollout diagnostics read the container's crash reason
+# from `status...lastState.terminated.message` (populated by
+# `terminationMessagePolicy: FallbackToLogsOnError`) over the apiserver,
+# because `kubectl logs` is unreachable on clusters where the apiserver
+# cannot reach kubelet:10250. Manifests should set that policy + omit any
+# appArmorProfile when nodes run with AppArmor disabled.
+#
+# All actions SHA-pinned. Consumed cross-repo as
+# `uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>`.
+#
+# NOT yet covered (add as a follow-up when the first caller needs it):
+# alembic/migrate Jobs and seeding app-config secrets from a cloud
+# secret store. Keep those caller-side until a verified path exists here.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label/pool. Native CPU for the image arch (e.g. ubuntu-24.04-arm for arm64; never setup-qemu)."
+        required: false
+        type: string
+        default: "ubuntu-24.04-arm"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 30
+      namespace:
+        description: "Target Kubernetes namespace."
+        required: true
+        type: string
+      service-name:
+        description: "Workload name (the Deployment name + app label selector value)."
+        required: true
+        type: string
+      image-repo:
+        description: "Image repo path under the registry host, WITHOUT host or tag (e.g. my-service)."
+        required: true
+        type: string
+      registry-host:
+        description: "Private registry hostname. Pass from a caller var; not a secret (it is a hostname, but it is private-infra so it is never defaulted here)."
+        required: true
+        type: string
+      build-context:
+        description: "Docker build context path."
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to the Dockerfile."
+        required: true
+        type: string
+      build-args:
+        description: "Optional newline-separated KEY=VALUE docker build args."
+        required: false
+        type: string
+        default: ""
+      node-version:
+        description: "If set, run actions/setup-node at this version before the prebuild hook (for frontend bundle builds). Empty = skip."
+        required: false
+        type: string
+        default: ""
+      prebuild-run:
+        description: "Optional shell run in the build context before `docker build` (e.g. bundle a frontend, vendor a shared module). Runs via an env var, not template interpolation."
+        required: false
+        type: string
+        default: ""
+      kustomize-dir:
+        description: "Directory passed to `kubectl apply -k`. Its *.yaml carry REGISTRY_PLACEHOLDER / TAG_PLACEHOLDER, pinned before apply."
+        required: true
+        type: string
+      rollout-timeout:
+        description: "`kubectl rollout status` timeout."
+        required: false
+        type: string
+        default: "180s"
+      registry-pull-secret:
+        description: "Name of the docker-registry imagePullSecret seeded in the namespace."
+        required: false
+        type: string
+        default: "registry-pull"
+      tailnet-tag:
+        description: "Tailscale ACL tag for the ephemeral CI join."
+        required: false
+        type: string
+        default: "tag:ci"
+      smoke-pod-name:
+        description: "If set, run a one-shot curl smoke pod with this name after rollout. Empty = skip smoke."
+        required: false
+        type: string
+        default: ""
+      smoke-curl-cmd:
+        description: "Shell command for the smoke pod (run as `sh -c`). Required when smoke-pod-name is set."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      registry-username:
+        description: "Registry username for docker login + the registry-pull secret."
+        required: true
+      registry-password:
+        description: "Registry password/token."
+        required: true
+      ts-authkey:
+        description: "Tailscale ephemeral auth key for the CI tailnet join."
+        required: true
+      kubeconfig-b64:
+        description: "base64-encoded kubeconfig for the target cluster."
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build + deploy ${{ inputs.service-name }} to k8s
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Preflight - required inputs present
+        env:
+          REGISTRY_HOST: ${{ inputs.registry-host }}
+        run: |
+          set -euo pipefail
+          [[ -n "$REGISTRY_HOST" ]] || { echo "::error::registry-host is empty (pass vars.DEPLOY_REGISTRY_HOST)"; exit 1; }
+
+      - name: Setup Node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Prebuild hook
+        if: inputs.prebuild-run != ''
+        env:
+          PREBUILD_RUN: ${{ inputs.prebuild-run }}
+        run: |
+          set -euo pipefail
+          bash -euo pipefail -c "$PREBUILD_RUN"
+
+      - name: Join tailnet (ephemeral)
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          authkey: ${{ secrets.ts-authkey }}
+          tags: ${{ inputs.tailnet-tag }}
+          use-cache: 'true'
+
+      - name: Registry login
+        env:
+          REGISTRY_HOST: ${{ inputs.registry-host }}
+          REGISTRY_USERNAME: ${{ secrets.registry-username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry-password }}
+        run: |
+          echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" \
+            --username "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Build + push image (native, no QEMU)
+        env:
+          REGISTRY_HOST: ${{ inputs.registry-host }}
+          IMAGE_REPO: ${{ inputs.image-repo }}
+          BUILD_CONTEXT: ${{ inputs.build-context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "$BUILD_ARGS" ]]; then
+            while IFS= read -r line; do
+              [[ -n "$line" ]] && args+=(--build-arg "$line")
+            done <<< "$BUILD_ARGS"
+          fi
+          docker build "$BUILD_CONTEXT" \
+            -f "$DOCKERFILE" \
+            -t "$REGISTRY_HOST/$IMAGE_REPO:${GITHUB_SHA}" \
+            "${args[@]}"
+          docker push "$REGISTRY_HOST/$IMAGE_REPO:${GITHUB_SHA}"
+
+      - name: Write kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.kubeconfig-b64 }}
+        run: |
+          install -m 700 -d "$HOME/.kube"
+          echo "$KUBECONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Seed registry-pull secret (idempotent)
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          PULL_SECRET: ${{ inputs.registry-pull-secret }}
+          REGISTRY_HOST: ${{ inputs.registry-host }}
+          REGISTRY_USERNAME: ${{ secrets.registry-username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry-password }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n "$NAMESPACE" create secret docker-registry "$PULL_SECRET" \
+            --docker-server="$REGISTRY_HOST" \
+            --docker-username="$REGISTRY_USERNAME" \
+            --docker-password="$REGISTRY_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Pin image placeholders
+        env:
+          REGISTRY_HOST: ${{ inputs.registry-host }}
+          KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e "s|REGISTRY_PLACEHOLDER|$REGISTRY_HOST|g" \
+            -e "s|TAG_PLACEHOLDER|${GITHUB_SHA}|g" \
+            "$KUSTOMIZE_DIR"/*.yaml
+          if grep -rn 'REGISTRY_PLACEHOLDER\|TAG_PLACEHOLDER' "$KUSTOMIZE_DIR"/; then
+            echo "::error::unsubstituted placeholder in $KUSTOMIZE_DIR"; exit 1
+          fi
+
+      - name: Apply manifests + rollout gate
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          SERVICE_NAME: ${{ inputs.service-name }}
+          KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+          ROLLOUT_TIMEOUT: ${{ inputs.rollout-timeout }}
+        run: |
+          set -euo pipefail
+          kubectl apply -k "$KUSTOMIZE_DIR"
+          if ! kubectl -n "$NAMESPACE" rollout status "deploy/$SERVICE_NAME" --timeout="$ROLLOUT_TIMEOUT"; then
+            echo "::error::$SERVICE_NAME rollout did not complete - dumping diagnostics"
+            kubectl -n "$NAMESPACE" describe "deploy/$SERVICE_NAME" || true
+            kubectl -n "$NAMESPACE" get pods -l "app=$SERVICE_NAME" -o wide || true
+            kubectl -n "$NAMESPACE" describe pods -l "app=$SERVICE_NAME" || true
+            # Crash reason via terminationMessagePolicy: FallbackToLogsOnError,
+            # readable over the apiserver when kubelet logs are blocked (BYON).
+            echo "=== container lastState.terminated (exitCode / reason / message) ==="
+            kubectl -n "$NAMESPACE" get pods -l "app=$SERVICE_NAME" -o jsonpath='{range .items[*]}POD {.metadata.name}{"\n"}exit={.status.containerStatuses[0].lastState.terminated.exitCode} reason={.status.containerStatuses[0].lastState.terminated.reason}{"\n"}msg={.status.containerStatuses[0].lastState.terminated.message}{"\n---\n"}{end}' || true
+            kubectl -n "$NAMESPACE" logs -l "app=$SERVICE_NAME" --tail=80 --all-containers || true
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
+            exit 1
+          fi
+
+      - name: Smoke probe the in-cluster Service
+        if: inputs.smoke-pod-name != ''
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          SMOKE_POD: ${{ inputs.smoke-pod-name }}
+          SMOKE_CMD: ${{ inputs.smoke-curl-cmd }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SMOKE_CMD" ]] || { echo "::error::smoke-pod-name set but smoke-curl-cmd empty"; exit 1; }
+          kubectl -n "$NAMESPACE" delete pod "$SMOKE_POD" --ignore-not-found
+          kubectl -n "$NAMESPACE" run "$SMOKE_POD" \
+            --image=curlimages/curl:8.11.1 \
+            --restart=Never --command -- sh -c "$SMOKE_CMD"
+          if ! kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
+               "pod/$SMOKE_POD" --timeout=120s; then
+            echo "::error::smoke probe pod did not succeed"
+            kubectl -n "$NAMESPACE" get pod "$SMOKE_POD" -o jsonpath='{.status.containerStatuses}' || true
+            kubectl -n "$NAMESPACE" logs "$SMOKE_POD" || true
+            exit 1
+          fi
+          kubectl -n "$NAMESPACE" delete pod "$SMOKE_POD"
+          echo "smoke OK"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$HOME/.kube/config"
