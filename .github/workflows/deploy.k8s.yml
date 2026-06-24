@@ -148,6 +148,11 @@ on:
         required: false
         type: string
         default: ""
+      ssm-secrets-b64:
+        description: "Newline-separated KEY=/ssm/path pairs like ssm-secrets, but each fetched value is base64-encoded (single line) before going into the Secret. Use for MULTI-LINE values (PEM certs, kubeconfigs): the Secret is built via `kubectl create secret --from-env-file`, which is one KEY=value per line, so a raw multi-line value's body lines parse as bogus keys and the seed fails. The consuming app base64-decodes KEY at read time. Private paths arrive here (never hardcoded)."
+        required: false
+        type: string
+        default: ""
       extra-secrets:
         description: "Newline-separated KEY=value literal pairs (non-SSM, e.g. Cognito ids) appended to the Secret."
         required: false
@@ -301,6 +306,7 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           SECRET_NAME: ${{ inputs.app-secret-name }}
           SSM_SECRETS: ${{ inputs.ssm-secrets }}
+          SSM_SECRETS_B64: ${{ inputs.ssm-secrets-b64 }}
           EXTRA_SECRETS: ${{ inputs.extra-secrets }}
         run: |
           set -euo pipefail
@@ -320,6 +326,20 @@ jobs:
               [[ -n "$val" ]] || { echo "::error::ssm-secret $key resolved empty (path $path)"; exit 1; }
               printf '%s=%s\n' "$key" "$val" >> "$ENVF"
             done <<< "$SSM_SECRETS"
+          fi
+          # SSM-sourced, base64-encoded (KEY=/ssm/path). For MULTI-LINE values
+          # (PEM certs, kubeconfigs): a raw multi-line value cannot go into a
+          # --from-env-file Secret (its body lines parse as bogus keys), so we
+          # base64 -w0 it to ONE line here; the app base64-decodes KEY at read
+          # time. Same empty-is-misconfig fail-fast as the plain ssm loop.
+          if [[ -n "$SSM_SECRETS_B64" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              key="${line%%=*}"; path="${line#*=}"
+              val="$(aws ssm get-parameter --name "$path" --with-decryption --query 'Parameter.Value' --output text)"
+              [[ -n "$val" ]] || { echo "::error::ssm-secret-b64 $key resolved empty (path $path)"; exit 1; }
+              printf '%s=%s\n' "$key" "$(printf '%s' "$val" | base64 -w0)" >> "$ENVF"
+            done <<< "$SSM_SECRETS_B64"
           fi
           # Literal (KEY=value), non-SSM (e.g. Cognito ids). An empty value
           # (e.g. an unset caller var) is a misconfig -> fail fast; this
