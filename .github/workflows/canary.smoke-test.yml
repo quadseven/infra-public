@@ -1,0 +1,39 @@
+name: Canary - Smoke test reusable
+
+# Canary for _reusable.smoke-test.yml. Probes a known-good public
+# endpoint to prove the smoke-test harness itself stays green: if this
+# job ever goes red, the reusable broke (not the consuming service).
+#
+# Asserts a 200 + a substring on a stable public page, plus an expected
+# non-200 to prove status assertions actually catch a mismatch (a probe
+# that "passed" because every status was accepted would be useless). A
+# real 500/timeout in the harness fails the job by design.
+#
+# Runs on PRs that touch the reusable or this file, on a weekly cron
+# (catch dependency/runtime drift), and on demand.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/_reusable.smoke-test.yml"
+      - ".github/workflows/canary.smoke-test.yml"
+  schedule:
+    # Mondays 12:00 UTC - weekly drift check independent of any PR.
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    uses: ./.github/workflows/_reusable.smoke-test.yml
+    with:
+      retries: 3
+      retry-delay: 5
+      timeout: 20
+      endpoints: |
+        [
+          {"name": "example.com 200 + content", "url": "https://example.com/", "expect-status": "200", "contains": "Example Domain"},
+          {"name": "example.com 404 path", "url": "https://example.com/this-path-does-not-exist-canary", "expect-status": "404"}
+        ]

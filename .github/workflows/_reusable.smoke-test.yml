@@ -1,0 +1,176 @@
+name: _reusable - Smoke test (curl-retry + assert)
+
+# Reusable post-deploy smoke test. Encodes the curl-retry + HTTP
+# status/content assertion pattern once so consuming repos stop
+# hand-rolling a bespoke probe loop in every deploy workflow (a retry
+# tuning or assertion change then lands in one place).
+#
+# Flow: for each endpoint in `endpoints` (a JSON array), curl the URL
+# with bounded retries, then assert the HTTP status code matches and
+# (optionally) that the response body contains a required substring.
+# Any failing probe fails the job. A canary caller points it at a
+# known-good endpoint to prove the harness itself stays green and that a
+# 500/timeout is caught.
+#
+# `endpoints` is a JSON array of probe objects. Fields per object:
+#   name           required  human label used in log + error output
+#   url            required  absolute https URL to probe
+#   expect-status  optional  expected HTTP status code (default "200")
+#   contains       optional  substring that MUST appear in the body
+#                            (implies a GET that downloads the body)
+#   method         optional  HTTP method (default GET)
+#   headers        optional  array of "Key: Value" request headers
+#   body           optional  request body string (e.g. for POST)
+# Example:
+#   [
+#     {"name":"api livez","url":"https://api.example.com/livez","expect-status":"200"},
+#     {"name":"landing","url":"https://example.com/","contains":"sign in"},
+#     {"name":"unsigned hook","url":"https://example.com/hook","expect-status":"401",
+#      "method":"POST","headers":["Content-Type: application/json"],"body":"{}"}
+#   ]
+#
+# Caller picks `runner` to match its tier: a GitHub-hosted runner
+# (ubuntu-latest) for public repos, or a self-hosted/ARC pool otherwise.
+# Consumed cross-repo as
+# `uses: githumps/infra-public/.github/workflows/_reusable.smoke-test.yml@<sha>`.
+# All actions SHA-pinned.
+
+on:
+  workflow_call:
+    inputs:
+      endpoints:
+        description: "JSON array of probe objects (see header). Each needs name+url; expect-status/contains/method/headers/body optional."
+        required: true
+        type: string
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      retries:
+        description: "curl --retry count per probe (transient-error retries)."
+        required: false
+        type: number
+        default: 3
+      retry-delay:
+        description: "Seconds between curl retries."
+        required: false
+        type: number
+        default: 5
+      timeout:
+        description: "Per-request curl --max-time in seconds."
+        required: false
+        type: number
+        default: 30
+      pre-delay:
+        description: "Seconds to sleep before probing (propagation wait after a deploy). 0 = no wait."
+        required: false
+        type: number
+        default: 0
+      user-agent:
+        description: "User-Agent sent on every probe."
+        required: false
+        type: string
+        default: "infra-public-smoke/1.0"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      # No checkout: this job only needs curl + jq (both preinstalled on
+      # ubuntu-latest) and the endpoints JSON passed as an input.
+      - name: "Smoke test"
+        env:
+          # Pass every caller value via env (never inlined as ${{ }} in the
+          # run body) so an endpoint URL/header/body can't inject a
+          # shell-expanded command. jq parses the JSON; the shell only sees
+          # already-parsed values.
+          ENDPOINTS: ${{ inputs.endpoints }}
+          RETRIES: ${{ inputs.retries }}
+          RETRY_DELAY: ${{ inputs.retry-delay }}
+          MAX_TIME: ${{ inputs.timeout }}
+          PRE_DELAY: ${{ inputs.pre-delay }}
+          USER_AGENT: ${{ inputs.user-agent }}
+        run: |
+          set -euo pipefail
+
+          # Validate the JSON shape before probing so a malformed input
+          # fails loudly instead of silently skipping endpoints.
+          if ! echo "$ENDPOINTS" | jq -e 'type == "array" and length > 0' > /dev/null; then
+            echo "::error::endpoints must be a non-empty JSON array"
+            exit 1
+          fi
+          count=$(echo "$ENDPOINTS" | jq 'length')
+
+          if [ "$PRE_DELAY" -gt 0 ] 2>/dev/null; then
+            echo "Waiting ${PRE_DELAY}s before probing..."
+            sleep "$PRE_DELAY"
+          fi
+
+          fail=0
+          for i in $(seq 0 $((count - 1))); do
+            obj=$(echo "$ENDPOINTS" | jq -c ".[$i]")
+            name=$(echo "$obj" | jq -r '.name // empty')
+            url=$(echo "$obj" | jq -r '.url // empty')
+            expect=$(echo "$obj" | jq -r '."expect-status" // "200"')
+            contains=$(echo "$obj" | jq -r '.contains // empty')
+            method=$(echo "$obj" | jq -r '.method // "GET"')
+            body=$(echo "$obj" | jq -r '.body // empty')
+
+            if [ -z "$name" ] || [ -z "$url" ]; then
+              echo "::error::endpoint[$i] missing required name or url: $obj"
+              fail=1
+              continue
+            fi
+
+            # Build the curl arg array safely (no eval/word-split on
+            # caller data). Headers come from the JSON array .headers[].
+            args=(--silent --show-error --location
+              --max-time "$MAX_TIME"
+              --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-all-errors
+              -A "$USER_AGENT" -X "$method")
+            while IFS= read -r hdr; do
+              [ -z "$hdr" ] && continue
+              args+=(-H "$hdr")
+            done < <(echo "$obj" | jq -r '(.headers // [])[]')
+            if [ -n "$body" ]; then
+              args+=(--data "$body")
+            fi
+
+            # Capture both body and status in one request. -w appends the
+            # status on its own trailing line; everything before it is the body.
+            resp=$(curl "${args[@]}" -w $'\n%{http_code}' "$url" || true)
+            status=$(printf '%s' "$resp" | tail -n1)
+            payload=$(printf '%s' "$resp" | sed '$d')
+
+            if [ "$status" != "$expect" ]; then
+              echo "::error::$name expected status $expect got $status ($url)"
+              fail=1
+              continue
+            fi
+            if [ -n "$contains" ] && ! printf '%s' "$payload" | grep -Fq "$contains"; then
+              echo "::error::$name (status $status) body missing required substring: $contains ($url)"
+              fail=1
+              continue
+            fi
+            if [ -n "$contains" ]; then
+              echo "OK $name (status $status) contains the required substring"
+            else
+              echo "OK $name (status $status)"
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::smoke test failed"
+            exit 1
+          fi
+          echo "All $count smoke probe(s) passed"
