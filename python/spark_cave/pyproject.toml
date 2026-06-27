@@ -1,0 +1,25 @@
+[project]
+name = "spark-cave"
+version = "1.0.0"
+description = "Persona-generic SQS-airlock library for the Spark-Cave: schema, payload packing (inline vs S3 spillover), enqueue, and idempotent result dispatch. Pure stdlib, no runtime deps; the SQS/S3 clients are injected so it is fully unit-testable with fakes."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["spark_cave"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

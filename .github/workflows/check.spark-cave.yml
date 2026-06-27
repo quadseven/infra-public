@@ -1,0 +1,30 @@
+name: check · spark_cave
+
+# Validates the canonical spark_cave Python package (python/spark_cave) on every
+# change to it. The package is PUBLIC + zero-runtime-dep so a public repo (grug)
+# and a private repo (somatic-scripts) can vendor it at build, SHA-pinned, and
+# share one wire contract without either leaking into the other. Testing it in
+# its canonical home means a consumer's vendored copy is already known-good.
+
+on:
+  pull_request:
+    paths:
+      - "python/spark_cave/**"
+      - ".github/workflows/check.spark-cave.yml"
+      - ".github/workflows/check.python.yml"
+  push:
+    branches: [main]
+    paths:
+      - "python/spark_cave/**"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.python.yml
+    with:
+      runner: ubuntu-latest
+      working-directory: python/spark_cave
+      ruff-version: "0.15.10"
+      test-cmd: "uv run pytest -q"
