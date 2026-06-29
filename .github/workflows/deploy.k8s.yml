@@ -392,13 +392,36 @@ jobs:
           # Completed Jobs are immutable -> delete any prior run before apply.
           kubectl -n "$NAMESPACE" delete job "$MIGRATE_JOB" --ignore-not-found
           kubectl apply -f "$MIGRATE_MANIFEST"
-          if ! kubectl -n "$NAMESPACE" wait --for=condition=complete "job/$MIGRATE_JOB" --timeout="$MIGRATE_TIMEOUT"; then
-            echo "::error::migrate job did not complete - dumping logs"
-            kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=200 || true
+          # Gate on Job STATUS, not on log-streaming. A condition=failed OR a
+          # wait timeout both mean "do not roll out". We race complete-vs-failed
+          # so a backoffLimit-exhausted Job fails fast instead of burning the
+          # full timeout, but the timeout still backstops a stuck Job.
+          if kubectl -n "$NAMESPACE" wait --for=condition=complete "job/$MIGRATE_JOB" --timeout="$MIGRATE_TIMEOUT" 2>/dev/null; then
+            MIGRATE_OK=1
+          elif kubectl -n "$NAMESPACE" wait --for=condition=failed "job/$MIGRATE_JOB" --timeout=10s 2>/dev/null; then
+            MIGRATE_OK=0
+          else
+            MIGRATE_OK=0   # neither condition within timeout -> treat as failure
+          fi
+          if [[ "$MIGRATE_OK" != "1" ]]; then
+            echo "::error::migrate job did not complete - dumping diagnostics"
             kubectl -n "$NAMESPACE" describe "job/$MIGRATE_JOB" || true
+            # `kubectl logs` traverses kubelet:10250, which is firewalled on BYON
+            # nodes (infra #1175) -> i/o timeout, no output. Read the failure
+            # over the apiserver instead: the migrate Job's pods set
+            # terminationMessagePolicy: FallbackToLogsOnError, so the alembic
+            # error lands in the container's terminated.message and is readable
+            # via `kubectl get -o jsonpath` (apiserver only). Same pattern the
+            # rollout gate below uses.
+            echo "=== migrate pod terminated state (exitCode / reason / message) ==="
+            kubectl -n "$NAMESPACE" get pods -l "job-name=$MIGRATE_JOB" -o jsonpath='{range .items[*]}POD {.metadata.name}{"\n"}exit={.status.containerStatuses[0].state.terminated.exitCode} reason={.status.containerStatuses[0].state.terminated.reason}{"\n"}msg={.status.containerStatuses[0].state.terminated.message}{"\n---\n"}{end}' || true
+            # Best-effort log stream (works only if kubelet:10250 is reachable).
+            kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=200 2>/dev/null || echo "(kubectl logs unavailable - kubelet:10250 blocked on BYON; see terminated.message above)"
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -20 || true
             exit 1
           fi
-          kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=50 || true
+          # Best-effort success-log stream (non-fatal, may be empty on BYON).
+          kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=50 2>/dev/null || true
           kubectl -n "$NAMESPACE" delete job "$MIGRATE_JOB"
 
       - name: Apply manifests + rollout gate
