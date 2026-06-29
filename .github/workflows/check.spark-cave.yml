@@ -20,6 +20,13 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs (a newer commit on the same PR branch, or a newer
+# push to main) - the check only cares about the latest commit's state, and
+# there is no scheduled run here to preserve.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     uses: ./.github/workflows/check.python.yml
