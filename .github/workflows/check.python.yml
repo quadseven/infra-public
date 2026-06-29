@@ -100,6 +100,11 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
       - name: "Set up uv"
+        # Step-level bound so a stalled provider/cache fetch fails fast and
+        # clearly here, rather than only being caught by the job timeout
+        # (grug-rule:subprocess-no-timeout). 5 min is far above the normal
+        # few-seconds install + cache restore.
+        timeout-minutes: 5
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:
           # Cache uv's download/wheel store across runs, keyed on the caller's
