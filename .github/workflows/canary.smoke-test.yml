@@ -25,6 +25,14 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded PR run when a newer commit is pushed to the same PR.
+# Guarded to pull_request only so the weekly scheduled drift check and any
+# manual dispatch always run to completion - they share the default-branch
+# ref and must not be cancelled by (or cancel) each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   canary:
     uses: ./.github/workflows/_reusable.smoke-test.yml
