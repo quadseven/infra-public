@@ -101,6 +101,18 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: "Set up uv"
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          # Cache uv's download/wheel store across runs, keyed on the caller's
+          # dependency files under working-directory. Pure speedup: uv still
+          # resolves authoritatively from the lockfile/pyproject, so a cache
+          # hit only avoids re-downloading wheels - it can never change which
+          # deps install. Cost-neutral (GitHub Actions cache); busts the key on
+          # any dependency-file change so it can't go stale.
+          enable-cache: true
+          cache-dependency-glob: |
+            ${{ inputs.working-directory }}/**/uv.lock
+            ${{ inputs.working-directory }}/**/requirements*.txt
+            ${{ inputs.working-directory }}/**/pyproject.toml
       - name: "Install dependencies"
         run: ${{ inputs.install-cmd }}
       - name: "Ruff check + format --check"
