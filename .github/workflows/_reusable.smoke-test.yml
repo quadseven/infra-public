@@ -157,7 +157,13 @@ jobs:
               fail=1
               continue
             fi
-            if [ -n "$contains" ] && ! printf '%s' "$payload" | grep -Fq "$contains"; then
+            # Herestring, NOT a pipe: `printf | grep -Fq` under pipefail
+            # reports a false MISS on any large body whose match sits
+            # early - grep -q exits at the first hit, printf takes
+            # SIGPIPE (141), pipefail fails the pipeline, and the `!`
+            # flips a successful match into "missing substring" (bit
+            # grug web.deploy's landing-page probes, 2026-07-04).
+            if [ -n "$contains" ] && ! grep -Fq -- "$contains" <<<"$payload"; then
               echo "::error::$name (status $status) body missing required substring: $contains ($url)"
               fail=1
               continue
