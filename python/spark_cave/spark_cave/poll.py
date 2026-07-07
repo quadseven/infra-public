@@ -447,13 +447,16 @@ async def _resolve_matched(
 
     if not result_obj.ok:
         # The connector reported a failure -> honest failed. Consume it.
-        log.warning(
-            "spark_cave.poll.failed", extra={"request_id": result_obj.request_id, "error": result_obj.error}
-        )
-        await _delete()
-        # Bounded + whitelisted-charset: this string may travel to a caller.
+        # Bounded + whitelisted-charset FIRST: this string may travel to a
+        # caller AND to the log pipeline -- never log the raw connector
+        # value (arbitrary payload text does not belong in log storage).
         err = str(result_obj.error or "")[:64]
         detail = err if re.fullmatch(r"[A-Za-z0-9_:]{1,64}", err) else None
+        log.warning(
+            "spark_cave.poll.failed",
+            extra={"request_id": result_obj.request_id, "error": detail or "<unwhitelisted-detail-dropped>"},
+        )
+        await _delete()
         return CaveOutcome(status="failed", detail=detail)
 
     try:

@@ -61,8 +61,12 @@ class _FakeSQSReceiver:
         return handle
 
     def receive_message(self, *, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds, AttributeNames=None):
+        # Rotate the head so successive polls see successive slices, the way
+        # a real deep FIFO would present distinct pages -- a fake that
+        # returns the same head forever makes depth-bound tests vacuous.
         self.receive_calls += 1
         batch = self._messages[:MaxNumberOfMessages]
+        self._messages = self._messages[len(batch) :] + batch
         return {"Messages": batch}
 
     def delete_message(self, *, QueueUrl, ReceiptHandle):
@@ -454,6 +458,21 @@ async def test_sync_parse_callback_is_supported():
 
     outcome = await fetch_result_for(channel, request_id="r", parse=sync_parse)
     assert outcome == CaveOutcome(status="ready", parsed={"seen": 1})
+
+
+@pytest.mark.asyncio
+async def test_raw_connector_error_never_reaches_logs(caplog):
+    import logging
+
+    sqs = _FakeSQSReceiver()
+    raw = "boom <script>alert(1)</script> \u00e9chec"
+    sqs.add(_result("r", persona="throwaway", ok=False, error=raw))
+    channel = CaveResultChannel(sqs=sqs, results_queue_url="https://q/x.fifo", persona="throwaway")
+    with caplog.at_level(logging.WARNING):
+        outcome = await fetch_result_for(channel, request_id="r", parse=_echo_parse)
+    assert outcome.status == "failed" and outcome.detail is None
+    for rec in caplog.records:
+        assert raw not in str(rec.__dict__)
 
 
 @pytest.mark.asyncio
