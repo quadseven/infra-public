@@ -427,7 +427,22 @@ def test_build_channel_s3_getter_rejects_foreign_bucket(monkeypatch):
     assert _FakeS3.calls == 0
 
 
-def test_build_channel_s3_getter_rejects_malformed_keys(monkeypatch):
+@pytest.mark.parametrize(
+    "bad_key",
+    ["../secrets", "/absolute", "a/../b", "sp ace", "uni\u00e9", "k" * 513, "", None, 42],
+    ids=[
+        "traversal",
+        "absolute",
+        "embedded-traversal",
+        "whitespace",
+        "unicode",
+        "overlong",
+        "empty",
+        "none",
+        "non-string",
+    ],
+)
+def test_build_channel_s3_getter_rejects_malformed_keys(monkeypatch, bad_key):
     monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "1")
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_PAYLOAD_BUCKET", "macchina-cave-payloads")
@@ -443,9 +458,11 @@ def test_build_channel_s3_getter_rejects_malformed_keys(monkeypatch):
         "MACCHINA", persona="meal-gen", sqs_factory=_FakeSQSReceiver, s3_factory=_FakeS3
     )
     assert channel is not None and channel.get_s3 is not None
-    for bad in ["../secrets", "/absolute", "a/../b", "sp ace", "uni\u00e9", "k" * 513, "", None, 42]:
-        with pytest.raises(ValueError, match="allowlist"):
-            channel.get_s3({"bucket": "macchina-cave-payloads", "key": bad})
+    with pytest.raises(ValueError, match="allowlist") as exc_info:
+        channel.get_s3({"bucket": "macchina-cave-payloads", "key": bad_key})
+    # the raw key never appears in the exception (it would reach logs)
+    if isinstance(bad_key, str) and bad_key:
+        assert bad_key not in str(exc_info.value)
     assert _FakeS3.calls == 0
 
 

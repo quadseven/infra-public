@@ -287,7 +287,13 @@ def build_result_channel_from_env(
                 or key.startswith("/")
                 or ".." in key
             ):
-                raise ValueError(f"cave result s3 pointer key fails the allowlist: {key!r:.80}")
+                # Deliberately does NOT echo the key: this message becomes
+                # log content via the caller's exception handler, and a
+                # manipulated pointer's content does not belong in logs.
+                klen = len(key) if isinstance(key, str) else -1
+                raise ValueError(
+                    f"cave result s3 pointer key fails the allowlist (type={type(key).__name__}, len={klen})"
+                )
             obj = s3_client.get_object(Bucket=allowed_bucket, Key=key)
             return obj["Body"].read()
 
