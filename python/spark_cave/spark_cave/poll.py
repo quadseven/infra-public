@@ -180,6 +180,21 @@ class CaveResultChannel:
     get_s3: S3Getter | None = None
 
 
+_S3_KEY_ALLOWLIST = re.compile(r"[A-Za-z0-9._/-]{1,512}")
+
+
+def _is_allowlisted_s3_key(key: object) -> bool:
+    """True only for a bounded, conservative-charset, traversal-free string
+    key. Connectors write program-generated keys; anything outside this
+    shape is a manipulated pointer, not a real spill."""
+    return (
+        isinstance(key, str)
+        and bool(_S3_KEY_ALLOWLIST.fullmatch(key))
+        and not key.startswith("/")
+        and ".." not in key
+    )
+
+
 def build_result_channel_from_env(
     prefix: str,
     *,
@@ -281,12 +296,7 @@ def build_result_channel_from_env(
                     f"but this channel is configured for {allowed_bucket!r}"
                 )
             key = pointer.get("key")
-            if (
-                not isinstance(key, str)
-                or not re.fullmatch(r"[A-Za-z0-9._/-]{1,512}", key)
-                or key.startswith("/")
-                or ".." in key
-            ):
+            if not _is_allowlisted_s3_key(key):
                 # Deliberately does NOT echo the key: this message becomes
                 # log content via the caller's exception handler, and a
                 # manipulated pointer's content does not belong in logs.
