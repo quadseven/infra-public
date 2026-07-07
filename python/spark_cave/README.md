@@ -21,6 +21,12 @@ discipline as the reusable workflows here).
   (`persona:principal`) + `MessageDeduplicationId`; the SQS client is injected.
 - `results` — parse a `FallbackResult` and dispatch to a per-persona handler;
   idempotent, never raises back into the consumer (no poison-message retry storm).
+- `lane` -- env-gated enqueue lane (`build_lane_from_env` + thread-hopped
+  `enqueue`); additive until per-persona call sites adopt it.
+- `poll` -- env-gated result-drain channel (`build_result_channel_from_env` +
+  `fetch_result_for`); the bounded-batch-scan, long-poll, delete-on-match
+  drain loop, parameterized by an injected `parse` callback so it carries no
+  persona-specific parsing. Additive until per-persona call sites adopt it.
 
 Pure stdlib, zero runtime deps. Queue/bucket names are caller-injected — this
 library hardcodes none.
