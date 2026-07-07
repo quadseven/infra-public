@@ -121,10 +121,11 @@ def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
     assert any("not a recognized boolean" in r.message for r in caplog.records)
 
 
-def test_explicit_falsy_disables_silently(monkeypatch, caplog):
+@pytest.mark.parametrize("falsy", ["0", "false", "no", "off"])
+def test_explicit_falsy_disables_silently(monkeypatch, caplog, falsy):
     import logging
 
-    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "false")
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", falsy)
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_JOBS_QUEUE_URL", "https://q/x.fifo")
     with caplog.at_level(logging.WARNING):
         lane = build_lane_from_env("MACCHINA", persona="meal-gen", sqs_factory=_FakeSQS)

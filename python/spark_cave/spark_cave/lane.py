@@ -70,7 +70,10 @@ def build_lane_from_env(
     behaviour: `cave_tail.build_cave_from_env` / `coach_cave_tail.build_cave_from_env`
     both return None the same way, for the same reason. `sqs_factory` is
     injectable for tests; defaults to a real boto3 SQS client built lazily so
-    importing this module needs no AWS.
+    importing this module needs no AWS. The package declares no runtime
+    dependencies, so if a lane is enabled without an injected factory and
+    boto3 is absent, this raises an ImportError naming both remedies. A
+    set-but-unrecognized enable value logs a warning and disables the lane.
     """
     enabled_var = f"{prefix}_CAVE_ENABLED"
     queue_var = f"SPARK_CAVE_{prefix}_JOBS_QUEUE_URL"
