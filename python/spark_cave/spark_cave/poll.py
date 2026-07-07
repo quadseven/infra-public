@@ -180,6 +180,21 @@ class CaveResultChannel:
     get_s3: S3Getter | None = None
 
 
+_S3_KEY_ALLOWLIST = re.compile(r"[A-Za-z0-9._/-]{1,512}")
+
+
+def _is_allowlisted_s3_key(key: object) -> bool:
+    """True only for a bounded, conservative-charset, traversal-free string
+    key. Connectors write program-generated keys; anything outside this
+    shape is a manipulated pointer, not a real spill."""
+    return (
+        isinstance(key, str)
+        and bool(_S3_KEY_ALLOWLIST.fullmatch(key))
+        and not key.startswith("/")
+        and ".." not in key
+    )
+
+
 def build_result_channel_from_env(
     prefix: str,
     *,
@@ -267,16 +282,29 @@ def build_result_channel_from_env(
         allowed_bucket = bucket
 
         def get_s3(pointer: dict) -> bytes:
-            # The env-configured bucket is the ONLY bucket this channel may
-            # read. A message-supplied pointer naming any other bucket is
-            # rejected outright -- honoring it would let queue content
-            # expand the read surface past the lane's IAM intent.
+            # BOTH pointer fields are message-controlled and BOTH are
+            # allowlisted before any S3 call. Bucket: the env-configured
+            # bucket is the ONLY bucket this channel may read -- honoring a
+            # message-supplied bucket would let queue content expand the
+            # read surface past the lane's IAM intent. Key: bounded,
+            # conservative charset, no traversal shapes -- connectors write
+            # program-generated keys, so anything outside this shape is a
+            # manipulated pointer, not a real spill.
             if pointer.get("bucket") != allowed_bucket:
                 raise ValueError(
                     f"cave result s3 pointer names bucket {pointer.get('bucket')!r}, "
                     f"but this channel is configured for {allowed_bucket!r}"
                 )
-            obj = s3_client.get_object(Bucket=allowed_bucket, Key=pointer["key"])
+            key = pointer.get("key")
+            if not _is_allowlisted_s3_key(key):
+                # Deliberately does NOT echo the key: this message becomes
+                # log content via the caller's exception handler, and a
+                # manipulated pointer's content does not belong in logs.
+                klen = len(key) if isinstance(key, str) else -1
+                raise ValueError(
+                    f"cave result s3 pointer key fails the allowlist (type={type(key).__name__}, len={klen})"
+                )
+            obj = s3_client.get_object(Bucket=allowed_bucket, Key=key)
             return obj["Body"].read()
 
     return CaveResultChannel(
