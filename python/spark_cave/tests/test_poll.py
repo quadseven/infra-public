@@ -60,7 +60,9 @@ class _FakeSQSReceiver:
         self._messages.append(msg)
         return handle
 
-    def receive_message(self, *, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds, AttributeNames=None):
+    def receive_message(
+        self, *, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds, MessageSystemAttributeNames=None
+    ):
         # Rotate the head so successive polls see successive slices, the way
         # a real deep FIFO would present distinct pages -- a fake that
         # returns the same head forever makes depth-bound tests vacuous.
