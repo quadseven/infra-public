@@ -135,7 +135,7 @@ jobs:
             # Build the curl arg array safely (no eval/word-split on
             # caller data). Headers come from the JSON array .headers[].
             args=(--silent --show-error --location
-              --max-time "$MAX_TIME"
+              --max-time "$MAX_TIME" --connect-timeout 10
               --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-all-errors
               -A "$USER_AGENT" -X "$method")
             while IFS= read -r hdr; do
