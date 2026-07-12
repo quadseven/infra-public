@@ -353,10 +353,21 @@ jobs:
               printf '%s\n' "$line" >> "$ENVF"
             done <<< "$EXTRA_SECRETS"
           fi
-          # Delete-then-create: `kubectl apply` MERGES secret data, leaving
-          # stale keys when the shape changes; delete first for a clean state.
-          kubectl -n "$NAMESPACE" delete secret "$SECRET_NAME" --ignore-not-found
-          kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" --from-env-file="$ENVF"
+          # SERVER-SIDE APPLY, not delete-then-create: two app pipelines can
+          # seed the SAME shared secret (e.g. a services/_shared change
+          # triggering both), and delete->create leaves a window where the
+          # sibling's create lands first and this one dies "already exists"
+          # (live failure, 2026-07-12). SSA upserts atomically AND still
+          # drops stale keys going forward: the field manager owns every key
+          # it applies, so a key removed from the env-file is pruned on the
+          # next apply. One-time transition caveat: keys created by the OLD
+          # delete+create flow are owned by a different manager and survive
+          # until the next shape change under SSA; delete the secret manually
+          # if a legacy key must vanish immediately.
+          kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
+            --from-env-file="$ENVF" --dry-run=client -o yaml \
+            | kubectl -n "$NAMESPACE" apply --server-side --force-conflicts \
+                --field-manager=deploy-k8s-secret-seed -f -
           rm -f "$ENVF"
 
       - name: Pin image placeholders
