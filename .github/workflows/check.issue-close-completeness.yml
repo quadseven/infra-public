@@ -6,12 +6,10 @@ name: _reusable · issue-close completeness guard
 # `force-close`/`wontfix` label. Exempt sections (Out of scope / Blocked by /
 # Reverse-if-wrong / Candidate / Further notes) are NOT counted.
 #
-# Caller (per repo) — `on: issues: [closed]`, grant `issues: write`, pass the
-# runner per the tier policy (public → ubuntu-latest; private → ARC pool):
-#   jobs:
-#     guard:
-#       uses: githumps/infra-public/.github/workflows/check.issue-close-completeness.yml@<sha>
-#       with: { runner: arc-infrastructure }   # omit for public (ubuntu-latest)
+# Bugs fixed 2026-07-12:
+# - Line-wrapped bullets now tracked across continuation lines
+# - Code block checkboxes ignored (tracked via ``` delimiter state)
+# - Section header detection more lenient (matches start of line, not entire line)
 
 on:
   workflow_call:
@@ -43,33 +41,104 @@ jobs:
               core.info('force-close/wontfix label present — allowed');
               return;
             }
+            
             const body = issue.body || '';
-            const exempt = /out of scope|blocked by|reverse-if-wrong|candidate|further notes|notes$/i;
-            let skipping = false;
-            const open = [];
-            for (const raw of body.split('\n')) {
+            const lines = body.split('\n');
+            
+            // Track state across lines
+            let inCodeBlock = false;  // track ``` blocks
+            let skippingSection = false;  // currently in an exempt section (Out of scope, etc.)
+            let currentBulletChecked = null;  // if we're tracking a multi-line bullet, is it checked?
+            
+            const uncheckedItems = [];
+            
+            for (const raw of lines) {
               const line = raw.trim();
-              if (/^#{1,6}\s+/.test(line) || /^\*\*[^*]+\*\*\s*$/.test(line)) {
-                skipping = exempt.test(line.replace(/[#*]/g, '').trim());
+              
+              // Toggle code block state (``` marks)
+              if (/^```\w*$/.test(line)) {
+                inCodeBlock = !inCodeBlock;
                 continue;
               }
-              if (!skipping && /^[-*]\s+\[\s\]\s+/.test(line)) {
-                open.push(line.replace(/^[-*]\s+\[\s\]\s+/, '').slice(0, 100));
+              
+              // Skip all content inside code blocks
+              if (inCodeBlock) {
+                continue;
+              }
+              
+              // Detect section headers (more lenient: just needs to start with ** or #)
+              const isSectionHeader = /^#{1,6}\s+|^(\*\*|__)[^*\n]*(\*\*|__)/.test(line);
+              
+              if (isSectionHeader) {
+                // Check if this is an exempt section header
+                const lowerLine = line.toLowerCase().replace(/[#*_]/g, '');
+                skippingSection = /out of scope|blocked by|reverse-if-wrong|candidate|further notes|notes$/.test(lowerLine);
+                
+                // If we were tracking a multi-line bullet that ended without being checked, flag it
+                if (currentBulletChecked !== null && !currentBulletChecked) {
+                  uncheckedItems.push(currentBulletText);
+                }
+                currentBulletChecked = null;
+                currentBulletText = '';
+                continue;
+              }
+              
+              // Detect list item start: - [ ] or - [x]
+              const listItemMatch = /^[-*]\s+\[\s([ xX])\]\s+(.*)/.exec(line);
+              
+              if (listItemMatch) {
+                const isChecked = /x|X/.test(listItemMatch[1]);
+                const restOfLine = listItemMatch[2];
+                
+                // First line of a potential multi-line bullet
+                currentBulletChecked = isChecked;
+                currentBulletText = restOfLine.slice(0, 150);  // Cap at 150 chars
+                
+                // If not checked, we'll keep tracking continuation lines
+                if (!isChecked) {
+                  continue;
+                }
+                
+                // Item is checked - no need to track further
+                currentBulletChecked = null;
+                currentBulletText = '';
+              } else if (currentBulletChecked === false && line.length > 0 && !/^[-*]/.test(line)) {
+                // Continuation of an unchecked multi-line bullet (not a new list item)
+                // Add this continuation to the tracked text
+                currentBulletText += ' ' + line.slice(0, 150 - currentBulletText.length);
+              } else if (currentBulletChecked === false && /^[-*]/.test(line)) {
+                // New bullet starts while we're tracking a previous unchecked one - flag the old one
+                uncheckedItems.push(currentBulletText.trim());
+                currentBulletChecked = null;
+                currentBulletText = '';
+              } else if (currentBulletChecked === false && line.length === 0) {
+                // Empty line ends the continuation without a new bullet — flag as incomplete
+                uncheckedItems.push(currentBulletText.trim());
+                currentBulletChecked = null;
+                currentBulletText = '';
               }
             }
-            if (open.length === 0) {
+            
+            // If we ended while still tracking an unchecked multi-line bullet, flag it
+            if (currentBulletChecked === false) {
+              uncheckedItems.push(currentBulletText.trim());
+            }
+            
+            if (uncheckedItems.length === 0) {
               core.info('no open acceptance/test items — close stands');
               return;
             }
+            
             await github.rest.issues.update({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: issue.number, state: 'open',
             });
-            const list = open.map(i => `- [ ] ${i}`).join('\n');
+            
+            const formattedList = uncheckedItems.map(i => `- [ ] ${i}`).join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: issue.number,
-              body: `🚧 **Reopened by the close-completeness guard** — closed as *completed* but still has ${open.length} unchecked item(s):\n\n${list}\n\n` +
+              body: `🚧 **Reopened by the close-completeness guard** — closed as *completed* but still has ${uncheckedItems.length} unchecked item(s):\n\n${formattedList}\n\n` +
                 `Finish + check them, or close it **as "not planned"** / add a \`force-close\` label. Exempt sections (Out of scope / Blocked by / Reverse-if-wrong / Candidate / Further notes) aren't counted.`,
             });
-            core.warning(`reopened #${issue.number} — ${open.length} unchecked item(s)`);
+            core.warning(`reopened #${issue.number} — ${uncheckedItems.length} unchecked item(s)`);
