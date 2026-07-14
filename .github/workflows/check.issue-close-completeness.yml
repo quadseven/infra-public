@@ -72,10 +72,19 @@ jobs:
                 continue;
               }
               
-              // Detect section headers only when NOT tracking a multi-line bullet continuation.
-              // A line starting with ** or __ after trimming could be either a real header OR
-              // a trimmed continuation line - we must not misclassify the latter as a header.
-              const isSectionHeader = currentBulletChecked === null && /^#{1,6}\s+|^(\*\*|__)[^*\n]*(\*\*)/.test(line);
+              // An ATX (#) header is unambiguous and always a real header, even
+              // while tracking a multi-line bullet continuation -- unlike a
+              // **bold**/__bold__ line, which could be either a real header OR
+              // a trimmed continuation line, so THAT alternative is gated to
+              // NOT-tracking only (we must not misclassify the latter as a
+              // header). Gating both alternatives the same way silently
+              // swallowed an unchecked item followed immediately by a real
+              // `## Header` with no blank line in between -- a common issue
+              // template shape -- since the header then fell through to the
+              // continuation-line branch instead of flushing the bullet.
+              const isAtxHeader = /^#{1,6}\s+/.test(line);
+              const isBoldHeader = currentBulletChecked === null && /^(\*\*|__)[^*\n]*(\*\*)/.test(line);
+              const isSectionHeader = isAtxHeader || isBoldHeader;
               
               if (isSectionHeader) {
                 // Save previous section state before updating (for flushing pending bullets correctly)
@@ -104,8 +113,8 @@ jobs:
                 continue;
               }
               
-              // Detect list item start: - [ ] or - [x]  
-              const listItemMatch = /^[-*]\s+\[\s([ xX])\]\s+(.*)/.exec(line);
+              // Detect list item start: - [ ] or - [x]
+              const listItemMatch = /^[-*]\s+\[([ xX])\]\s+(.*)/.exec(line);
               
               if (listItemMatch) {
                 const isChecked = /x|X/.test(listItemMatch[1]);
