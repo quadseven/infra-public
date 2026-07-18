@@ -34,7 +34,7 @@ permissions:
   id-token: write   # ECR-OIDC path (declared by the reusable; grant even for GHCR)
 jobs:
   ship:
-    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
+    uses: quadseven/infra-public/.github/workflows/ship.python.yml@<sha>
     with:
       image: ghcr.io/${{ github.repository }}
       tag: ${{ github.sha }}
@@ -52,13 +52,13 @@ Call it once per target. Each produces its own multi-arch manifest:
 ```yaml
 jobs:
   web:
-    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
+    uses: quadseven/infra-public/.github/workflows/ship.python.yml@<sha>
     with: { image: ghcr.io/${{ github.repository }}-web, tag: ${{ github.sha }}, target: web,
             push: "${{ github.event_name != 'pull_request' }}" }
     secrets: inherit
   worker:
     needs: [web]   # share the build cache / avoid double ruff+pytest: set run-check:false here
-    uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
+    uses: quadseven/infra-public/.github/workflows/ship.python.yml@<sha>
     with: { image: ghcr.io/${{ github.repository }}-worker, tag: ${{ github.sha }}, target: worker,
             run-check: false, push: "${{ github.event_name != 'pull_request' }}" }
     secrets: inherit

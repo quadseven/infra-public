@@ -17,7 +17,7 @@ name: _reusable · Python app for k8s (lint/test + multi-arch image)
 # Consume cross-repo, SHA-pinned:
 #   jobs:
 #     ship:
-#       uses: githumps/infra-public/.github/workflows/ship.python.yml@<sha>
+#       uses: quadseven/infra-public/.github/workflows/ship.python.yml@<sha>
 #       permissions: { contents: read, packages: write, id-token: write }
 #       with:
 #         image: ghcr.io/${{ github.repository }}

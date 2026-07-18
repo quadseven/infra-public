@@ -16,13 +16,13 @@ name: _reusable · upstream drift check
 #
 # Caller picks `runner` per tier policy (public -> ubuntu-latest; private ->
 # their ARC pool). Grant `issues: write`. Consumed cross-repo as
-# `uses: githumps/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>`.
+# `uses: quadseven/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>`.
 # All actions SHA-pinned.
 #
 # Example caller:
 #   jobs:
 #     check:
-#       uses: githumps/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>
+#       uses: quadseven/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>
 #       permissions: { contents: read, issues: write }
 #       with:
 #         name: claude-config

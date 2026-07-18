@@ -27,7 +27,7 @@ name: _reusable - k8s deploy (native build -> rollout -> smoke)
 # appArmorProfile when nodes run with AppArmor disabled.
 #
 # All actions SHA-pinned. Consumed cross-repo as
-# `uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>`.
+# `uses: quadseven/infra-public/.github/workflows/deploy.k8s.yml@<sha>`.
 #
 # Optional, default-off stages (a caller that doesn't set them is unaffected):
 #   - seed-app-secrets: OIDC -> read SSM params (with-decryption) + literal

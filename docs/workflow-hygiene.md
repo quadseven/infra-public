@@ -4,7 +4,7 @@
 touches them (`.github/workflows/check.workflow-hygiene.yml`, running
 `.github/scripts/workflow_hygiene.py`). This exists because infra-public
 is the shared reusable-workflow library every fleet repo inherits via
-`uses: githumps/infra-public/...` - drift here is inherited by every
+`uses: quadseven/infra-public/...` - drift here is inherited by every
 consumer, and nothing local caught it before this gate (infra-public#46).
 
 ## Authoritative rule set

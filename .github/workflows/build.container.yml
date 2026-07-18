@@ -19,7 +19,7 @@ name: _reusable · Container build (native CPU, no QEMU)
 # (OIDC) or no-push (CI). For multi-arch, see the multiarch sibling.
 #
 # All actions SHA-pinned. Consumed cross-repo as
-# `uses: githumps/infra-public/.github/workflows/build.container.yml@<sha>`.
+# `uses: quadseven/infra-public/.github/workflows/build.container.yml@<sha>`.
 
 on:
   workflow_call:

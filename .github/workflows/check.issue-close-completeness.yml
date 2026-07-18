@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # This is a REUSABLE workflow: when a caller in a different repo
-      # invokes it via `uses: githumps/infra-public/.github/workflows/
+      # invokes it via `uses: quadseven/infra-public/.github/workflows/
       # check.issue-close-completeness.yml@<ref>`, the job's DEFAULT
       # checkout context is the CALLER's repo, not infra-public - so
       # parse.js is not present unless explicitly fetched. `github.
@@ -49,7 +49,7 @@ jobs:
       - name: "Checkout infra-public (self) for the parser module"
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: githumps/infra-public
+          repository: quadseven/infra-public
           ref: ${{ job.workflow_sha }}
           path: _close-completeness-guard-src
           persist-credentials: false

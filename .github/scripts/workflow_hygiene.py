@@ -2,7 +2,7 @@
 """Workflow-hygiene linter for infra-public's own workflows (infra-public#46).
 
 infra-public is the shared reusable-workflow library every fleet repo
-inherits via `uses: githumps/infra-public/...`, so drift here is inherited
+inherits via `uses: quadseven/infra-public/...`, so drift here is inherited
 by every consumer with nothing local to catch it - #18 (Node-20-era action
 pins that still passed a SHA-only check) was found and fixed only by a
 manual audit, not by any gate.
