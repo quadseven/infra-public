@@ -21,6 +21,17 @@ on:
         description: "Image repo path WITHOUT tag. Full ref (ghcr.io/owner/repo) or repo-path when the `registry` secret (ECR host) is set."
         required: true
         type: string
+      environment:
+        description: |
+          Optional GitHub deployment environment for the AWS-role-assuming jobs. Set this
+          when the ECR role's OIDC trust is scoped to an environment subject
+          (sub=repo:OWNER/REPO:environment:NAME) rather than a branch ref. A `uses:`
+          (reusable-call) job in the CALLER cannot set `environment`, so the subject is
+          fixed here instead. Default "" = no environment (subject is the branch ref,
+          the common case). Mirrors build.container.yml's identical input.
+        required: false
+        type: string
+        default: ""
       tag:
         description: "Tag for the final manifest list."
         required: true
@@ -92,6 +103,9 @@ jobs:
           - { platform: linux/amd64, runner: "${{ inputs.amd64-runner }}", arch: amd64, host: x86_64 }
           - { platform: linux/arm64, runner: "${{ inputs.arm64-runner }}", arch: arm64, host: aarch64 }
     runs-on: ${{ matrix.runner }}
+    # Empty string = no environment (subject is the branch ref). Set by callers
+    # whose ECR role trust is scoped to an environment subject (e.g. aws-prod).
+    environment: ${{ inputs.environment }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -155,6 +169,9 @@ jobs:
     needs: build
     if: ${{ inputs.push }}
     runs-on: ubuntu-24.04
+    # Empty string = no environment (subject is the branch ref). Set by callers
+    # whose ECR role trust is scoped to an environment subject (e.g. aws-prod).
+    environment: ${{ inputs.environment }}
     timeout-minutes: 10
     outputs:
       digest: ${{ steps.merge.outputs.digest }}
