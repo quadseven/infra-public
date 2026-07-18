@@ -33,15 +33,12 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ._env import _lazy_boto3_client, _read_cave_enable_flag
 from .enqueue import DEFAULT_INLINE_THRESHOLD_BYTES
 from .enqueue import enqueue as _sc_enqueue
 from .schema import FallbackJob
 
 log = logging.getLogger("spark_cave.lane")
-
-# Same truthy set both `cave_tail.py` and `coach_cave_tail.py` use today.
-_TRUTHY = ("1", "true", "yes", "on")
-_FALSY = ("0", "false", "no", "off")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,19 +75,7 @@ def build_lane_from_env(
     enabled_var = f"{prefix}_CAVE_ENABLED"
     queue_var = f"SPARK_CAVE_{prefix}_JOBS_QUEUE_URL"
 
-    raw = os.getenv(enabled_var, "").strip().lower()
-    if raw not in _TRUTHY:
-        # Unset or an explicit "off" is a normal disabled lane -- stay quiet.
-        # Anything else set is a misconfiguration (a typo'd "treu" would
-        # otherwise silently disable the lane); warn so it is diagnosable.
-        if raw and raw not in _FALSY:
-            log.warning(
-                "%s=%r is not a recognized boolean; %s lane disabled (use one of %s to enable)",
-                enabled_var,
-                raw,
-                persona,
-                sorted(_TRUTHY),
-            )
+    if not _read_cave_enable_flag(prefix, persona, kind_label="lane"):
         return None
     queue_url = os.getenv(queue_var, "").strip()
     if not queue_url:
@@ -102,19 +87,7 @@ def build_lane_from_env(
         # (schema/packing/enqueue are all injection-based); this default
         # factory is the one boto3-touching convenience, resolved only when
         # a lane is actually enabled without an injected factory.
-        try:
-            import boto3  # local import: keep module import AWS-free
-        except ImportError as exc:
-            raise ImportError(
-                "spark_cave declares no runtime dependencies; to enable a "
-                f"cave lane ({enabled_var} is set) either install boto3 or "
-                "pass sqs_factory= explicitly"
-            ) from exc
-
-        def _default_sqs_factory():
-            return boto3.client("sqs")
-
-        sqs_factory = _default_sqs_factory
+        sqs_factory = _lazy_boto3_client("sqs", enabled_var=enabled_var, kind_label="lane")
 
     return CaveLane(sqs=sqs_factory(), jobs_queue_url=queue_url, persona=persona)
 

@@ -84,15 +84,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from ._env import _lazy_boto3_client, _read_cave_enable_flag
 from .results import handle_result
 from .schema import FallbackResult
 
 log = logging.getLogger("spark_cave.poll")
-
-# Same truthy/falsy sets `lane.build_lane_from_env` uses for the identical
-# `<PREFIX>_CAVE_ENABLED` flag -- see DECISION 1 above.
-_TRUTHY = ("1", "true", "yes", "on")
-_FALSY = ("0", "false", "no", "off")
 
 # How many messages to pull per ReceiveMessage. A results FIFO interleaves
 # results for many callers' requests; one poll scans a batch looking for OUR
@@ -222,16 +218,7 @@ def build_result_channel_from_env(
     queue_var = f"SPARK_CAVE_{prefix}_RESULTS_QUEUE_URL"
     bucket_var = f"SPARK_CAVE_{prefix}_PAYLOAD_BUCKET"
 
-    raw = os.getenv(enabled_var, "").strip().lower()
-    if raw not in _TRUTHY:
-        if raw and raw not in _FALSY:
-            log.warning(
-                "%s=%r is not a recognized boolean; %s result channel disabled (use one of %s to enable)",
-                enabled_var,
-                raw,
-                persona,
-                sorted(_TRUTHY),
-            )
+    if not _read_cave_enable_flag(prefix, persona, kind_label="result channel"):
         return None
     queue_url = os.getenv(queue_var, "").strip()
     if not queue_url:
@@ -242,41 +229,21 @@ def build_result_channel_from_env(
         # The package deliberately declares ZERO runtime dependencies; this
         # default factory is the one boto3-touching convenience, resolved
         # only when a channel is actually enabled without an injected
-        # factory.
-        try:
-            import boto3  # local import: keep module import AWS-free
-        except ImportError as exc:
-            raise ImportError(
-                "spark_cave declares no runtime dependencies; to enable a "
-                f"cave result channel ({enabled_var} is set) either install "
-                "boto3 or pass sqs_factory= explicitly"
-            ) from exc
-
-        def _default_sqs_factory():
-            # Explicit Session().client() rather than the bare module-level
-            # convenience -- see the module docstring's note on why the
-            # drain side takes the more defensive form.
-            return boto3.session.Session().client("sqs")
-
-        sqs_factory = _default_sqs_factory
+        # factory. Explicit Session().client() (use_session=True) rather
+        # than the bare module-level convenience -- see the module
+        # docstring's note on why the drain side takes the more defensive
+        # form.
+        sqs_factory = _lazy_boto3_client(
+            "sqs", enabled_var=enabled_var, kind_label="result channel", use_session=True
+        )
 
     get_s3: S3Getter | None = None
     bucket = os.getenv(bucket_var, "").strip()
     if bucket:
         if s3_factory is None:
-            try:
-                import boto3  # local import: keep module import AWS-free
-            except ImportError as exc:
-                raise ImportError(
-                    "spark_cave declares no runtime dependencies; to enable "
-                    f"s3 spillover ({bucket_var} is set) either install "
-                    "boto3 or pass s3_factory= explicitly"
-                ) from exc
-
-            def _default_s3_factory():
-                return boto3.session.Session().client("s3")
-
-            s3_factory = _default_s3_factory
+            s3_factory = _lazy_boto3_client(
+                "s3", enabled_var=bucket_var, kind_label="s3 spillover", use_session=True
+            )
 
         s3_client = s3_factory()
         allowed_bucket = bucket
