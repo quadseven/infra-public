@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   deploy:
-    uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>
+    uses: quadseven/infra-public/.github/workflows/deploy.k8s.yml@<sha>
     with:
       namespace: <namespace>
       service-name: <service>
@@ -95,7 +95,7 @@ A migrate/secret-seeding caller grants `id-token: write` (OIDC) in addition to
 jobs:
   deploy:
     permissions: { contents: read, id-token: write }
-    uses: githumps/infra-public/.github/workflows/deploy.k8s.yml@<sha>
+    uses: quadseven/infra-public/.github/workflows/deploy.k8s.yml@<sha>
     with:
       # ... build/deploy inputs ...
       seed-app-secrets: true
