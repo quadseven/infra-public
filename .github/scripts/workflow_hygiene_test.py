@@ -56,6 +56,17 @@ class ShaPinning(unittest.TestCase):
         text = "steps:\n  - uses: ./.github/actions/my-composite\n"
         self.assertEqual(self._lint(text), [])
 
+    def test_double_quoted_unpinned_uses_is_caught(self):
+        # CodeRabbit #61: a quoted scalar bypassed USES_RE entirely before.
+        text = 'steps:\n  - uses: "actions/checkout@v4"\n'
+        errors = self._lint(text)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unpinned action", errors[0])
+
+    def test_single_quoted_pinned_uses_passes(self):
+        text = "steps:\n  - uses: 'actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd'  # v5\n"
+        self.assertEqual(self._lint(text), [])
+
 
 class CurlTimeouts(unittest.TestCase):
     def test_curl_with_both_flags_passes(self):
@@ -74,6 +85,47 @@ class CurlTimeouts(unittest.TestCase):
         errors = lint_curl_timeouts(DUMMY, "\n".join(lines))
         self.assertEqual(len(errors), 1)
         self.assertIn("curl missing", errors[0])
+
+    def test_folded_block_scalar_curl_is_checked(self):
+        # CodeRabbit #61: `run: >` (folded) was invisible to the old
+        # `run: |`-only block detector.
+        lines = [
+            "run: >",
+            '  curl "$URL"',
+        ]
+        errors = lint_curl_timeouts(DUMMY, "\n".join(lines))
+        self.assertEqual(len(errors), 1)
+
+    def test_folded_block_scalar_with_chomping_indicator_passes_when_safe(self):
+        lines = [
+            "run: >-",
+            '  curl --max-time 30 --connect-timeout 10 "$URL"',
+        ]
+        errors = lint_curl_timeouts(DUMMY, "\n".join(lines))
+        self.assertEqual(errors, [])
+
+    def test_single_line_run_curl_is_checked(self):
+        # CodeRabbit #61: `run: curl ...` on one line was invisible - only
+        # multi-line `run: |` blocks were scanned. This exact shape (a
+        # bare single-line `run:`) already exists 7x in this repo today.
+        line = 'run: curl "$URL"'
+        errors = lint_curl_timeouts(DUMMY, line)
+        self.assertEqual(len(errors), 1)
+
+    def test_single_line_run_non_curl_is_not_flagged(self):
+        # A single-line run: that isn't a curl call (e.g. a templated
+        # test-cmd input) must not be misdetected.
+        line = "run: ${{ inputs.test-cmd }}"
+        errors = lint_curl_timeouts(DUMMY, line)
+        self.assertEqual(errors, [])
+
+    def test_bare_block_opener_line_itself_is_not_treated_as_inline(self):
+        # `run: |` alone (no trailing content) must be recognized as a
+        # block opener, not misparsed as an inline scalar whose "command"
+        # is the literal pipe character.
+        lines = ["run: |", "  echo hi"]
+        errors = lint_curl_timeouts(DUMMY, "\n".join(lines))
+        self.assertEqual(errors, [])
 
     def test_curl_in_description_prose_is_not_flagged(self):
         # A `description:` field mentioning curl is YAML metadata text, not
@@ -135,6 +187,15 @@ class SetE(unittest.TestCase):
     def test_allow_marker_suppresses(self):
         text = "#!/bin/sh\n# hygiene: allow-no-set-e this script is intentionally best-effort\necho hi\n"
         self.assertEqual(lint_shell_script(Path("x.sh"), text), [])
+
+    def test_shebang_dash_e_passes(self):
+        # CodeRabbit #61: the rule's own doc claims `bash -e` satisfies it,
+        # but the regex only matched an explicit `set -e` line - this
+        # pins the fix.
+        self.assertEqual(lint_shell_script(Path("x.sh"), "#!/bin/bash -e\necho hi\n"), [])
+
+    def test_shebang_without_dash_e_still_fails(self):
+        self.assertEqual(len(lint_shell_script(Path("x.sh"), "#!/bin/bash\necho hi\n")), 1)
 
 
 class JobTimeouts(unittest.TestCase):

@@ -42,12 +42,15 @@ import re
 import sys
 from pathlib import Path
 
-WF_DIR = Path(".github/workflows")
-SCRIPTS_DIR = Path(".github/scripts")
+GITHUB_DIR = Path(".github")
+WF_DIR = GITHUB_DIR / "workflows"
 
 # Local composites (./.github/actions/...) and same-repo reusables have no
-# pinning concern; only owner/repo@ref refs are checked.
-USES_RE = re.compile(r"^\s*-?\s*uses:\s*([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)")
+# pinning concern; only owner/repo@ref refs are checked. `['"]?` before the
+# owner tolerates a quoted YAML scalar (`uses: "actions/checkout@v4"`) -
+# the ref capture group's own charset already excludes the closing quote,
+# so no corresponding change is needed on the right side.
+USES_RE = re.compile(r"^\s*-?\s*uses:\s*['\"]?([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # Rule 5 - curl timeouts. A real `curl` invocation: the token is preceded by
@@ -63,6 +66,11 @@ CURL_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-curl-no-timeout\b")
 # Rule 6 - set -e in standalone shell scripts. `bash -e`/`set -e`/
 # `set -euo pipefail` all satisfy it; we only require the -e flag to be on.
 SET_E_RE = re.compile(r"^\s*set\s+-[a-z]*e", re.M)
+# A shebang carrying -e (`#!/bin/bash -e`, `#!/bin/sh -e`) satisfies the
+# rule the same way an explicit `set -e` line does. `\b[a-z]*sh\b`, not
+# `\bsh\b` - "bash"/"dash"/"zsh" have no word boundary before "sh" (the
+# preceding "a" is itself a word char), only after it.
+SHEBANG_E_RE = re.compile(r"^#!.*\b[a-z]*sh\b.*\s-[a-z]*e\b", re.M)
 SET_E_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-no-set-e\b")
 
 # Rule 7 - per-job timeout-minutes. Walk the `jobs:` map; a job key sits two
@@ -70,6 +78,14 @@ SET_E_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-no-set-e\b")
 # `timeout-minutes:`) sit four spaces in. A job with `runs-on:` needs
 # `timeout-minutes:`; a job whose key carries a top-level `uses:` (reusable
 # caller) is exempt. Matrix `runs-on: ${{ ... }}` still needs a job timeout.
+#
+# The 2/4-space indentation is hardcoded, not derived from `jobs:` - a
+# deliberate scope limit (CodeRabbit #61 flagged this as a real gap for a
+# workflow indented differently). Every one of this repo's 14 workflow
+# files already uses standard 2-space indentation, matching this script's
+# own regex-based, non-YAML-parsing design; genuinely deriving indentation
+# would mean a structural YAML parse for a repo-local convention gate. If
+# infra-public ever adopts non-standard indentation, widen this then.
 JOBS_HEADER_RE = re.compile(r"^jobs:\s*$")
 JOB_KEY_RE = re.compile(r"^\s{2}([A-Za-z0-9_-]+):\s*$")
 # re.M: these match with .search() against a multi-line `block` string built
@@ -98,14 +114,22 @@ def code_part(line: str) -> str:
     return line
 
 
-RUN_BLOCK_RE = re.compile(r"^(\s*)run:\s*\|")
+# Literal (`|`) or folded (`>`) block scalar, with an optional chomping
+# indicator (`-`/`+`). Both are treated identically here - folding only
+# changes how newlines are interpreted at execution time, not whether a
+# `curl` call inside the block needs its timeout flags.
+RUN_BLOCK_RE = re.compile(r"^(\s*)run:\s*[|>][-+]?\s*$")
+# A single-line scalar: `run: <command>` with real content on the same
+# line (not `|`/`>`, which are handled above as block openers).
+RUN_INLINE_RE = re.compile(r"^(\s*)run:\s*(?![|>]([-+]?\s*$))(\S.*)$")
 
 
 def _run_block_line_numbers(lines: list[str]) -> set[int]:
-    """Return the 0-indexed line numbers that fall inside a `run: |` YAML
-    block scalar - i.e. actual shell code, not `name:`/`description:`
-    field text elsewhere in the file (a `description:` value can legally
-    contain the word "curl" as prose without being a real invocation)."""
+    """Return the 0-indexed line numbers that contain actual shell code -
+    inside a `run: |`/`run: >` YAML block scalar, or on a single-line
+    `run: <command>` scalar - as opposed to `name:`/`description:` field
+    text elsewhere in the file (a `description:` value can legally contain
+    the word "curl" as prose without being a real invocation)."""
     in_block: set[int] = set()
     i = 0
     n = len(lines)
@@ -118,13 +142,16 @@ def _run_block_line_numbers(lines: list[str]) -> set[int]:
                 in_block.add(i)
                 i += 1
             continue
+        if RUN_INLINE_RE.match(lines[i]):
+            in_block.add(i)
         i += 1
     return in_block
 
 
 def lint_curl_timeouts(path: Path, text: str) -> list[str]:
-    """Rule 5. For each real `curl` invocation INSIDE a `run: |` block
-    (never in YAML field text), join continuation lines (trailing `\\`) so
+    """Rule 5. For each real `curl` invocation inside a `run:` scalar
+    (block `|`/`>` or single-line - never in YAML field text like
+    `name:`/`description:`), join continuation lines (trailing `\\`) so
     a multi-line curl's flags are seen together, then require both timeout
     flags unless the allow-marker is present on the curl line or anywhere in
     the contiguous run of comment-only lines directly above it (a wrapped
@@ -169,7 +196,7 @@ def lint_shell_script(path: Path, text: str) -> list[str]:
     `bash -e {0}`, so -e is already applied there)."""
     if SET_E_ALLOW_RE.search(text):
         return []
-    if SET_E_RE.search(text):
+    if SET_E_RE.search(text) or SHEBANG_E_RE.search(text):
         return []
     return [f"{path}: standalone shell script has no `set -e` (a failed command can "
             f"go unnoticed) - add it, or mark `# hygiene: allow-no-set-e <reason>`"]
@@ -244,8 +271,8 @@ def main() -> int:
     targets: list[Path] = []
     if WF_DIR.is_dir():
         targets.extend(sorted(WF_DIR.glob("*.yml")))
-    if SCRIPTS_DIR.is_dir():
-        targets.extend(sorted(SCRIPTS_DIR.rglob("*.sh")))
+    if GITHUB_DIR.is_dir():
+        targets.extend(sorted(GITHUB_DIR.rglob("*.sh")))
 
     all_errors: list[str] = []
     for path in targets:
