@@ -53,6 +53,20 @@ WF_DIR = GITHUB_DIR / "workflows"
 USES_RE = re.compile(r"^\s*-?\s*uses:\s*['\"]?([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+# Rule 1b - EOL Node major detection. A SHA-pinned action that carries a
+# comment indicating a known-EOL major (e.g. `# v4` on actions/checkout or
+# actions/setup-node) passes the SHA check but still runs on EOL Node.
+# The comment format is `# vN` or `# vN.M` after the SHA.
+PIN_COMMENT_RE = re.compile(r"#\s*(v\d+(?:\.\d+)?)")
+# Actions known to have EOL majors. `actions/checkout` v4 and
+# `actions/setup-node` v4 both run on Node-20 (EOL). v5+ runs on Node-24.
+EOL_MAJOR: dict[str, set[str]] = {
+    "actions/checkout": {"v4"},
+    "actions/setup-node": {"v4"},
+}
+# All majors in EOL_MAJOR that are below the Node-24-capable floor.
+# (v5+ = Node-24 capable for these actions.)
+
 # Rule 5 - curl timeouts. A real `curl` invocation: the token is preceded by
 # start-of-string or a shell separator (not part of a longer word like
 # `mycurl`) AND immediately followed by an actual argument - a flag (-), a
@@ -250,11 +264,24 @@ def lint_file(path: Path) -> list[str]:
     for n, line in enumerate(lines, 1):
         code = code_part(line)
         m = USES_RE.match(code)
-        if m and not SHA_RE.match(m.group(2)):
-            errors.append(
-                f"{path}:{n}: unpinned action `{m.group(1)}@{m.group(2)}` - pin to a "
-                f"full 40-char commit SHA on a Node-24-capable major (see #18)"
-            )
+        if m:
+            ref = m.group(2)
+            if not SHA_RE.match(ref):
+                errors.append(
+                    f"{path}:{n}: unpinned action `{m.group(1)}@{ref}` - pin to a "
+                    f"full 40-char commit SHA on a Node-24-capable major (see #18)"
+                )
+            else:
+                # SHA-pinned - check for EOL Node major in the comment.
+                action = m.group(1)
+                if action in EOL_MAJOR:
+                    comment_match = PIN_COMMENT_RE.search(line)
+                    if comment_match and comment_match.group(1) in EOL_MAJOR[action]:
+                        errors.append(
+                            f"{path}:{n}: action `{action}@{ref}` is SHA-pinned but "
+                            f"commented as `{comment_match.group(1)}` (Node-20/EOL) - "
+                            f"re-pin to a Node-24-capable major (v5+) at a full SHA"
+                        )
 
     if path.suffix == ".sh":
         errors.extend(lint_shell_script(path, text))

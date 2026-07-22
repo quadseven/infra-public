@@ -47,7 +47,7 @@ jobs:
       # matches the exact version of this workflow that's currently
       # running, regardless of what repo/ref is calling it.
       - name: "Checkout infra-public (self) for the parser module"
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           repository: quadseven/infra-public
           ref: ${{ job.workflow_sha }}
