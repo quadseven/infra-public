@@ -1,0 +1,10 @@
+
+# Agent worktrees are scratch checkouts and are never committed. Without this
+# rule a single `git add -A` stages whatever a tool happened to leave inside
+# one, including local credential files that are meant to stay on disk, and the
+# only backstop is a secret scan that fires AFTER the commit already exists.
+#
+# Narrow ON PURPOSE: this matches the worktree directory and nothing else. A
+# broad `.claude/` rule would silently untrack files that ARE meant to be
+# committed, such as CLAUDE.md and settings.json.
+.claude/worktrees/
