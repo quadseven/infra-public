@@ -7,9 +7,8 @@ connector can route it to the right GPU model); the connector publishes a
 JSON round-trip + a deterministic FIFO dedup key. No I/O, no boto3.
 """
 
-# Spark-authored: first-drafted on an on-prem DGX Spark by its then-resident
-# coder model (qwen3-coder-next), 2026-06-27; substantially cleaned, typed, and
-# finalized by Claude.
+# Spark-authored: first-drafted by an on-prem model, 2026-06-27; substantially
+# cleaned, typed, and finalized by Claude.
 # (git grep "Spark-authored" lists all on-prem-model-generated code.)
 
 from __future__ import annotations

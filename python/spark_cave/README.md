@@ -37,6 +37,6 @@ library hardcodes none.
 
 ## Provenance
 
-Some modules carry a `Spark-authored:` comment block recording an on-prem model
-that generated them (model + host + date + review). `git grep "Spark-authored"`
+Some modules carry a `Spark-authored:` comment block recording that an on-prem
+model generated them (date + review status). `git grep "Spark-authored"`
 lists them.
