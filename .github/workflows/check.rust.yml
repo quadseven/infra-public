@@ -3,8 +3,7 @@ name: _reusable · Rust check (fmt + clippy + test)
 # Reusable Rust lint/test. Encodes the cargo fmt + clippy + test
 # conventions once so consuming Rust repos' CI jobs stop copy-pasting
 # them (a toolchain pin or lint-flag change then lands in one place).
-# Sibling of verify.temper.yml (which builds the temper binary via
-# cargo) and check.python.yml (the ruff + pytest equivalent).
+# Sibling of check.python.yml (the ruff + pytest equivalent).
 #
 # Flow: checkout -> install Rust toolchain (clippy + rustfmt) -> cache
 # cargo registry/git + target -> cargo fmt --check (toggle) -> cargo
