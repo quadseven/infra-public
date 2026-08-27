@@ -1,0 +1,146 @@
+name: sync · public-repo docs
+
+# Keeps a consuming repo's root-level AGENTS.md and CLAUDE.md in sync with the
+# canonical copies at quadseven/infra-public/templates/public-repo/. Those two
+# files are the public-repo write policy (infra#2953): every quadseven public
+# repo should carry the same rules rather than a hand-copied, drifting
+# duplicate. This workflow diffs the calling repo's copies against the
+# canonical ones and opens a normal PR with the update when they differ (or
+# don't exist yet) - nothing auto-merges, the target repo's own required
+# checks (Grug's DoR gate where present) apply same as any other PR.
+#
+# Consumed cross-repo as
+# uses: quadseven/infra-public/.github/workflows/sync.public-repo-docs.yml@<sha>
+# Caller grants contents: write, pull-requests: write.
+#
+# Example caller (5-line thin wrapper in the consuming repo):
+#   on:
+#     schedule: [{cron: "17 6 * * 1"}]
+#     workflow_dispatch: {}
+#   jobs:
+#     sync:
+#       uses: quadseven/infra-public/.github/workflows/sync.public-repo-docs.yml@<sha>
+#       permissions: { contents: write, pull-requests: write }
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label/pool (caller picks per tier policy)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      branch:
+        description: "Branch name used for the sync PR."
+        required: false
+        type: string
+        default: "chore/sync-public-repo-docs"
+      pr_label:
+        description: "Label applied to the opened PR. Skipped silently if the label doesn't exist in the target repo."
+        required: false
+        type: string
+        default: "chore"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: target
+
+      - name: Checkout canonical docs
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          sparse-checkout: templates/public-repo
+          sparse-checkout-cone-mode: false
+          path: canonical
+
+      - name: Diff and stage update
+        id: diff
+        run: |
+          set -euo pipefail
+          changed=false
+          for f in AGENTS.md CLAUDE.md; do
+            if ! cmp -s "canonical/templates/public-repo/$f" "target/$f" 2>/dev/null; then
+              changed=true
+              cp "canonical/templates/public-repo/$f" "target/$f"
+            fi
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Open sync PR
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+          LABEL: ${{ inputs.pr_label }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add AGENTS.md CLAUDE.md
+          if git diff --cached --quiet; then
+            echo "nothing staged after add - already in sync"
+            exit 0
+          fi
+
+          git checkout -B "$BRANCH"
+          git commit -m "chore: sync AGENTS.md/CLAUDE.md from infra-public canonical copy"
+          git push -f origin "$BRANCH"
+
+          body=$(cat <<'EOF'
+          ## Why
+
+          This repo's AGENTS.md/CLAUDE.md have drifted from the canonical
+          public-repo policy at quadseven/infra-public/templates/public-repo/
+          (infra#2953). Those two files encode what may never be written into
+          a public repo's issues, PRs, comments, or code - keeping every
+          public repo on the same copy, rather than a hand-maintained
+          duplicate, is the whole point of this sync workflow.
+
+          ## What
+
+          Replaces this repo's root AGENTS.md and CLAUDE.md with the current
+          canonical copies, verbatim.
+
+          ## Acceptance criteria
+
+          - [ ] AGENTS.md matches quadseven/infra-public's canonical copy byte-for-byte
+          - [ ] CLAUDE.md matches quadseven/infra-public's canonical copy byte-for-byte
+          - [ ] No other file in this repo is touched
+
+          ## Out of scope
+
+          - Any other repo-specific documentation
+          - The canonical policy's own content, which is edited in infra-public, not here
+
+          ## Estimate
+
+          Size: XS
+
+          Part of quadseven/infra#2953
+          EOF
+          )
+
+          existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)
+          if [[ -n "$existing" && "$existing" != "null" ]]; then
+            gh pr edit "$existing" --body "$body"
+            exit 0
+          fi
+
+          if ! gh pr create --title "chore: sync AGENTS.md/CLAUDE.md from infra-public" \
+              --body "$body" --head "$BRANCH" --label "$LABEL"; then
+            echo "retrying PR create without --label (label may not exist in this repo)" >&2
+            gh pr create --title "chore: sync AGENTS.md/CLAUDE.md from infra-public" \
+              --body "$body" --head "$BRANCH"
+          fi
