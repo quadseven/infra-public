@@ -35,6 +35,11 @@ on:
         required: false
         type: string
         default: ""
+      submodules:
+        description: "Fetch git submodules on checkout. Off by default - most callers' test suites need no submodule content, and turning this on unconditionally would silently start pulling arbitrary external repos into every job that calls this workflow. Set true only when the suite reads a submodule's checked-out files directly."
+        required: false
+        type: boolean
+        default: false
       install-cmd:
         description: "Dependency install command. Run as a shell command (caller-controlled by design) — do NOT forward untrusted data (PR titles, etc.) into it."
         required: false
@@ -90,6 +95,7 @@ jobs:
         # otherwise be able to read the persisted token. Lint/test need no git auth.
         with:
           persist-credentials: false
+          submodules: ${{ inputs.submodules }}
       # Pin the interpreter for system-install repos (use-uv-run:false): their
       # `uv pip install --system` targets the active Python, so without this the
       # runner's default version is used (e.g. ubuntu-latest's 3.12) instead of
