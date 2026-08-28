@@ -26,8 +26,9 @@ in a test fixture. Not "just this once because it's only in a closed
 issue" — closed does not mean hidden, and neither does deleted.
 
 This is broader than "don't commit secrets." A secret scanner catches an
-API key. It does not catch a sentence like *"Evan's home server, reachable
-at his usual address, needed a restart"* — nothing there matches a secret
+API key. It does not catch a sentence like *"[a real first name]'s home
+server, reachable at their usual address, needed a restart"* — nothing
+there matches a secret
 pattern, and it is exactly the kind of sentence that put a real name, a
 real domain, and a real IP into a public tracker tonight. Write for a
 stranger from the first word, not just the code.
