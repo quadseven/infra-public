@@ -56,8 +56,14 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Rule 1b - EOL Node major detection. A SHA-pinned action that carries a
 # comment indicating a known-EOL major (e.g. `# v4` on actions/checkout or
 # actions/setup-node) passes the SHA check but still runs on EOL Node.
-# The comment format is `# vN` or `# vN.M` after the SHA.
-PIN_COMMENT_RE = re.compile(r"#\s*(v\d+(?:\.\d+)?)")
+# The comment is written at whatever precision the author felt like: `# v4`,
+# `# v4.2` and `# v4.2.2` all name the same Node-20 major. Capture the MAJOR
+# alone and let the rest of the version float, so precision cannot decide the
+# verdict - an earlier form captured `v\d+(?:\.\d+)?` and compared THAT against
+# the bare-major table, so `# v4.2.2` reduced to `v4.2`, missed `{"v4"}` and
+# silently evaded the rule (#72; same failure mode as #64, which Rule 1b exists
+# to catch).
+PIN_COMMENT_RE = re.compile(r"#\s*(v\d+)(?:\.\d+)*")
 # Actions known to have EOL majors. `actions/checkout` v4 and
 # `actions/setup-node` v4 both run on Node-20 (EOL). v5+ runs on Node-24.
 EOL_MAJOR: dict[str, set[str]] = {
@@ -277,9 +283,13 @@ def lint_file(path: Path) -> list[str]:
                 if action in EOL_MAJOR:
                     comment_match = PIN_COMMENT_RE.search(line)
                     if comment_match and comment_match.group(1) in EOL_MAJOR[action]:
+                        # Report the comment as WRITTEN, not the reduced major -
+                        # `# v4.2.2` is what the author has to go find and edit.
+                        written = comment_match.group(0).split("#", 1)[1].strip()
                         errors.append(
                             f"{path}:{n}: action `{action}@{ref}` is SHA-pinned but "
-                            f"commented as `{comment_match.group(1)}` (Node-20/EOL) - "
+                            f"commented as `{written}` (major "
+                            f"`{comment_match.group(1)}` = Node-20/EOL) - "
                             f"re-pin to a Node-24-capable major (v5+) at a full SHA"
                         )
 

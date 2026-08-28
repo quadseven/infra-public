@@ -52,6 +52,44 @@ class ShaPinning(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("unpinned action", errors[0])
 
+    def test_eol_major_is_flagged_at_any_comment_precision(self):
+        # #72: the comment is the ONLY signal Rule 1b has, and it is written at
+        # whatever precision the author felt like. All three of these name the
+        # same Node-20 checkout, so all three must fail identically. Before the
+        # fix only the bare `# v4` was caught: the capture kept one optional
+        # minor and was compared against the bare-major table, so `# v4.2.2`
+        # reduced to `v4.2`, missed `{"v4"}`, and passed the gate clean - the
+        # live instance being `_reusable.upstream-drift-check.yml` shipping a
+        # Node-20 checkout to every consumer.
+        sha = "11bd71901bbe5b1630ceea73d27597364c9af683"
+        for comment in ("v4", "v4.2", "v4.2.2"):
+            with self.subTest(comment=comment):
+                text = f"steps:\n  - uses: actions/checkout@{sha}  # {comment}\n"
+                errors = self._lint(text)
+                self.assertEqual(len(errors), 1, f"`# {comment}` must be flagged")
+                self.assertIn("Node-20/EOL", errors[0])
+                # The message names the comment as WRITTEN, so the author can
+                # grep for the string they actually have to change.
+                self.assertIn(f"`{comment}`", errors[0])
+
+    def test_node24_capable_major_is_not_flagged_at_any_precision(self):
+        # The negative half of #72: precision must not create false positives
+        # either. v5+ is Node-24 for these actions and must stay clean.
+        sha = "93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+        for comment in ("v5", "v5.0", "v5.0.1"):
+            with self.subTest(comment=comment):
+                text = f"steps:\n  - uses: actions/checkout@{sha}  # {comment}\n"
+                self.assertEqual(self._lint(text), [], f"`# {comment}` must pass")
+
+    def test_setup_node_eol_major_precision_too(self):
+        # EOL_MAJOR carries two actions; the reduction must apply to both, not
+        # just the one that had the live instance.
+        sha = "a0853c24544627f65ddf259abe73b1d18a591444"
+        text = f"steps:\n  - uses: actions/setup-node@{sha}  # v4.4.0\n"
+        errors = self._lint(text)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Node-20/EOL", errors[0])
+
     def test_local_composite_action_is_not_checked(self):
         text = "steps:\n  - uses: ./.github/actions/my-composite\n"
         self.assertEqual(self._lint(text), [])
