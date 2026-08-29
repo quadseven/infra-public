@@ -20,12 +20,22 @@ name: _reusable · Leak scan (PR diff + PR text)
 #   the run body: a PR title is attacker-controlled text and `${{ }}` inside a
 #   `run:` is a shell injection.
 #
-# WHERE THE SCRIPT COMES FROM. One copy, in this repo, fetched at the exact
-#   revision the caller pinned this workflow to (github.job_workflow_sha). Not
-#   vendored per repo: a scanner copied into 17 repos is 17 copies to fix when a
-#   pattern is wrong, which is the same "one-time manual fix" failure this
-#   workflow exists to end. A caller that pins `@<sha>` therefore gets that
-#   revision's workflow AND that revision's patterns, together.
+# WHERE THE SCRIPT COMES FROM. One copy, in this repo, fetched at `scanner-ref`
+#   (default `main`). Not vendored per repo: a scanner copied into 17 repos is 17
+#   copies to fix when a pattern is wrong, which is the same "one-time manual fix
+#   that never propagates" failure this workflow exists to end. Taking it from
+#   `main` is what makes a pattern fix reach every consumer without re-pinning 17
+#   callers, and `main` is itself gated by the scanner's fixture suite
+#   (check.leak-scan-guard.yml) plus this repo's own leak-scan caller.
+#
+#   The tradeoff is real and deliberate: a caller that pins `uses: ...@<sha>` for
+#   the workflow still gets the CURRENT patterns, so infra-public's main can
+#   change what a pinned consumer's check does. Pin `scanner-ref` to a SHA to
+#   opt out of that. It cannot be resolved automatically: `github.job_workflow_sha`
+#   would be exactly the right value, but it is empty in a called workflow's job
+#   context (only the OIDC token carries that claim), and defaulting to "the
+#   workflow's own revision" silently could not be done at all - which is why
+#   this is an input a human sets rather than a guess.
 #
 # THE DENY-LIST IS OPTIONAL, ON PURPOSE. The generic shapes below need no
 #   credentials, which is why they are the default - a guard that needs AWS auth
@@ -54,7 +64,8 @@ name: _reusable · Leak scan (PR diff + PR text)
 #   jobs:
 #     leak-scan:
 #       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
-#       permissions: { contents: read }
+#       permissions: { contents: read }   # the caller owns permissions - see below
+#       # with: { scanner-ref: <sha> }    # optional: pin the patterns too
 #
 # Example caller WITH the deny-list layer (needs OIDC + a role that can read
 # exactly that one parameter):
@@ -91,10 +102,10 @@ on:
         type: boolean
         default: true
       scanner-ref:
-        description: "Override the infra-public revision the scanner is taken from. Default (empty) = the revision this workflow was called at, so the patterns always match the pinned workflow. Set only to debug."
+        description: "infra-public revision to take the scanner from. Default `main` = pattern fixes reach every consumer without re-pinning. Set a SHA to pin the patterns as well as the workflow. infra-public's own caller passes its PR head SHA, so a scanner change is tested by the guard it changes."
         required: false
         type: string
-        default: ""
+        default: "main"
       runner:
         description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
         required: false
@@ -153,21 +164,22 @@ jobs:
       - name: "3. Resolve which infra-public revision the scanner comes from"
         id: scanner-rev
         env:
-          OVERRIDE: ${{ inputs.scanner-ref }}
-          WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          SCANNER_REF: ${{ inputs.scanner-ref }}
         run: |
           set -euo pipefail
-          ref="${OVERRIDE:-${WORKFLOW_SHA:-}}"
-          # This value becomes a checkout `ref:`. It comes from the caller's own
-          # workflow file or from the runner, both trusted - but a ref is still
-          # the wrong place to be relaxed, so anything outside a git ref's
-          # character set is refused rather than passed through.
-          if [ -n "$ref" ] && ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
-            echo "::error::scanner-ref '$ref' contains characters that are not valid in a git ref"
+          ref="$SCANNER_REF"
+          # An empty ref would make the next step check out the default branch
+          # by accident rather than by decision. Say so instead.
+          if [ -z "$ref" ]; then
+            echo "::error::scanner-ref is empty. Pass a branch, tag or SHA (default is 'main')."
             exit 1
           fi
-          if [ -z "$ref" ]; then
-            echo "::error::cannot resolve the scanner revision - github.job_workflow_sha is empty and no scanner-ref was given. Failing closed rather than silently taking the scanner from main, which would decouple the patterns from the pinned workflow."
+          # This value becomes a checkout `ref:`. It comes from the caller's own
+          # workflow file, which is trusted - but a ref is still the wrong place
+          # to be relaxed, so anything outside a git ref's character set is
+          # refused rather than passed through.
+          if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::scanner-ref '$ref' contains characters that are not valid in a git ref"
             exit 1
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"

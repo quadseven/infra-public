@@ -27,3 +27,8 @@ jobs:
       contents: read
     with:
       allowed-repo-refs: infra
+      # This repo IS the scanner's home, so it scans with the tree under review
+      # rather than with main: a change to the patterns is exercised by the guard
+      # it changes, in the PR that changes it. Consumer repos leave this alone
+      # and take main.
+      scanner-ref: ${{ github.event.pull_request.head.sha }}
