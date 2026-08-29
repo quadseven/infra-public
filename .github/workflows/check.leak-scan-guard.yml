@@ -1,0 +1,42 @@
+name: check · leak-scan guard
+
+# Gates the leak scanner (.github/scripts/check_private_leaks.py) behind its
+# fixture suite. The scanner is fetched at runtime by
+# _reusable.leak-scan.yml and runs as a blocking check in every consuming
+# repo, so a regression here does not break one repo, it breaks the guard
+# everywhere at once - and the specific way it would break is by going GREEN
+# (an unreadable diff, a deny-list that never arrived), which no consumer
+# would ever notice. The suite pins the fail-closed paths for that reason,
+# not just the matching.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/check_private_leaks.py"
+      - ".github/scripts/check_private_leaks_test.py"
+      - ".github/workflows/_reusable.leak-scan.yml"
+      - ".github/workflows/check.leak-scan-guard.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/check_private_leaks.py"
+
+permissions:
+  contents: read
+
+# Cancel superseded runs - only the latest commit's state matters, and
+# there is no scheduled run here to preserve.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Fixture suite for the leak scanner"
+        run: python3 .github/scripts/check_private_leaks_test.py

@@ -8,3 +8,8 @@
 # broad `.claude/` rule would silently untrack files that ARE meant to be
 # committed, such as CLAUDE.md and settings.json.
 .claude/worktrees/
+
+# Python bytecode from running the .github/scripts test suites in place. The
+# tests are run directly (`python3 .github/scripts/<name>_test.py`), which
+# writes __pycache__ next to the script, and a `git add -A` then stages it.
+__pycache__/

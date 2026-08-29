@@ -1,0 +1,38 @@
+name: leak-scan
+
+# Thin caller for this repo's own reusable leak scan - infra-public eats its
+# own cooking before any other repo is asked to adopt it, the same way
+# self-sync.public-repo-docs.yml does for the docs sync. See
+# _reusable.leak-scan.yml for the mechanism and for what a consuming repo's
+# caller looks like.
+#
+# `edited` is in the trigger list on purpose: the PR title and body are
+# scanned too, and a body can leak long after the last push.
+#
+# The `uses:` pin below is a commit on the branch that introduced this file,
+# because a workflow cannot pin a SHA that does not exist yet. Bump it to the
+# merge commit once this lands, the same as any other pin here.
+#
+# allowed-repo-refs: this repo cites the private tracker's issue numbers by
+# convention - `infra#1234` appears in nearly every workflow header here and
+# in the sync workflow's PR body - so those refs are exempted rather than
+# blocked. Whether that convention should change is a separate call; blocking
+# it here would only mean this guard gets switched off. This repo's own
+# `infra-public#123` refs are always exempt and need no entry.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  leak-scan:
+    uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@6775be8ebb40962917b6ec806dfd9f0d4dafd771
+    permissions:
+      contents: read
+    with:
+      allowed-repo-refs: infra
+      # This repo IS the scanner's home, so it scans with the tree under review
+      # rather than with main: a change to the patterns is exercised by the guard
+      # it changes, in the PR that changes it. Consumer repos leave this alone
+      # and take main.
+      scanner-ref: ${{ github.event.pull_request.head.sha }}
