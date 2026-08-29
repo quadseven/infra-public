@@ -7,8 +7,8 @@ by every consumer with nothing local to catch it - #18 (Node-20-era action
 pins that still passed a SHA-only check) was found and fixed only by a
 manual audit, not by any gate.
 
-The canonical rule set lives in `infrastructure/.github/scripts/
-workflow_hygiene.py` (the private fleet repo) and has seven rules. Four are
+The canonical rule set lives in `infra/.github/scripts/
+workflow_hygiene.py` (the private fleet repo) and has NINE rules. Four are
 genuinely repo-agnostic and ported here verbatim (same regexes, same
 exception-comment conventions, so a contributor who knows one knows both):
 
@@ -27,10 +27,28 @@ exception-comment conventions, so a contributor who knows one knows both):
      `# hygiene: allow-no-timeout-minutes <reason>`.
 
 Deliberately NOT ported - infra-specific, would be dead code or actively
-wrong here: dead-cluster reference checking (k8s-ts is a private-infra
-teardown artifact) and ARC-runner-routing policy (infra-public's own CI
-uses plain GitHub-hosted runners, see check.spark-cave.yml - there is no
-ARC fleet-routing concept in this repo).
+wrong here: dead-cluster reference checking (Rule 2 - k8s-ts is a
+private-infra teardown artifact) and ARC-runner-routing policy (Rule 4 -
+infra-public's own CI uses plain GitHub-hosted runners, see
+check.spark-cave.yml - there is no ARC fleet-routing concept in this repo).
+
+NOT YET DISPOSITIONED - tracked in #71. These canonical rules are neither
+ported nor deliberately rejected; nobody has written down which they should
+be. Listing them here so the gap is visible rather than silent, but this is
+a statement of the open question, NOT a decision:
+
+  3. environment-scoped secrets. Not hypothetical here: #51
+     ("build.container-multiarch.yml consumes the env-scoped ECR OIDC role
+     without an environment input") was a live instance in this repo, found
+     by hand rather than by this gate.
+  8. working-tree branch switch before a local action (infra #1850). A bare
+     `git checkout <branch>` deletes `.github/` from the working tree, so
+     every later `uses: ./...` dies. No live violation here today.
+  9. GHA template injection in `run:` blocks (infra #1852). An interpolated
+     `${{ }}` reaches the shell as script TEXT, so quoting cannot save it.
+
+Deciding 3, 8 and 9 - and recording HOW this ledger stays current, since the
+canonical count has now drifted twice - is the remaining work in #71.
 
 Run locally:  python3 .github/scripts/workflow_hygiene.py
 Exit 0 = clean; exit 1 = violations (printed as ::error:: for CI annotation).
