@@ -9,6 +9,10 @@ name: leak-scan
 # `edited` is in the trigger list on purpose: the PR title and body are
 # scanned too, and a body can leak long after the last push.
 #
+# The `uses:` pin below is a commit on the branch that introduced this file,
+# because a workflow cannot pin a SHA that does not exist yet. Bump it to the
+# merge commit once this lands, the same as any other pin here.
+#
 # allowed-repo-refs: this repo cites the private tracker's issue numbers by
 # convention - `infra#1234` appears in nearly every workflow header here and
 # in the sync workflow's PR body - so those refs are exempted rather than
