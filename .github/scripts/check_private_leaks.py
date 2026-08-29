@@ -63,7 +63,7 @@ deliberate differences, all needed to make one script serve every repo:
 
   1. The "this repo's own issue refs are fine" exemption was hardcoded to one
      repo name. It is now --allow-repo-ref, supplied by the caller.
-  2. The cross-repo-ref pattern missed the FULLY-QUALIFIED form (`owner/repo#1`
+  2. The cross-repo-ref pattern missed the FULLY-QUALIFIED form (`<owner>/<repo>#1`
      slipped past the lookbehind entirely), which is the more revealing of the
      two. It now matches both forms.
   3. Two shapes were added for AGENTS.md bullets that had no pattern at all: a
@@ -129,7 +129,7 @@ PATTERNS: list[tuple[str, str, str]] = [
 
 # The cross-repo-ref rule is not in PATTERNS because it is not a constant: the
 # caller's allow-list is spliced into it per run. Repos named there may be
-# referenced as `repo#123`/`owner/repo#123`; anything else in that shape is
+# referenced as `<repo>#123`/`<owner>/<repo>#123`; anything else in that shape is
 # treated as possibly naming a private repo. A bare `#123` is always this repo's
 # own issue and is never matched.
 REPO_REF_WHY = "a cross-repo issue reference (may name a private repo)"
@@ -138,10 +138,11 @@ REPO_REF_WHY = "a cross-repo issue reference (may name a private repo)"
 def repo_ref_pattern(allowed: list[str]) -> str:
     """Build the cross-repo-ref regex with `allowed` exempted.
 
-    Both forms are matched: bare `repo#1` and fully-qualified `owner/repo#1`.
+    Both forms are matched: bare `<repo>#1` and fully-qualified `<owner>/<repo>#1`.
     grug's original matched only the bare form - the lookbehind that stops
-    `bar#1` matching inside `foo/bar#1` also meant a fully-qualified private ref
-    sailed through untouched, and that is the form that names the owner too.
+    the repo half of a qualified ref matching on its own also meant the whole
+    qualified ref sailed through untouched - and that is the form that names the
+    owner too.
 
     The final char before `#` must be alphanumeric: prose like "Post-#77" is a
     hyphenated word followed by THIS repo's issue number, not a repo reference,
@@ -264,7 +265,7 @@ def main() -> int:
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
     ap.add_argument("--deny-list-ssm", help="SSM param holding extra terms")
     ap.add_argument("--allow-repo-ref", action="append", default=[], metavar="NAME",
-                    help="repo name whose `name#123` refs are fine (repeatable); "
+                    help="repo name whose `<name>#123` refs are fine (repeatable); "
                          "callers pass at least their own repo's name")
     ap.add_argument("--require-changes", action="store_true",
                     help="with --diff/--staged: exit 2 if the diff is empty, so a "

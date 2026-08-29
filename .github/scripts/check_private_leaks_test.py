@@ -122,8 +122,9 @@ class CrossRepoRefs(unittest.TestCase):
 
     def test_other_repo_qualified_ref_is_caught(self):
         # grug's original missed this form entirely: the lookbehind that stops
-        # `bar#1` matching inside `foo/bar#1` also let the whole
-        # `owner/repo#123` sail through - the form that names the owner too.
+        # the repo half of a qualified ref matching on its own also
+        # let the whole qualified ref sail through - the form that names
+        # the owner too.
         self.assertIn("private-issue-ref", hits("see someone/someplace#12")[0])  # leak-guard-allow: fixture
 
     def test_bare_issue_number_is_clean(self):

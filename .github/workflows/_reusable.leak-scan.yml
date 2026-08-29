@@ -71,7 +71,7 @@ on:
   workflow_call:
     inputs:
       allowed-repo-refs:
-        description: "Comma-separated repo names whose `name#123` refs are fine. The calling repo's own name is always allowed and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
+        description: "Comma-separated repo names whose `<name>#123` refs are fine. The calling repo's own name is always allowed and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
         required: false
         type: string
         default: ""
@@ -230,7 +230,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This repo's own `name#123` refs are always fine; anything else in
+          # This repo's own `<name>#123` refs are always fine; anything else in
           # that shape may be naming a private repo.
           args=(--allow-repo-ref "${OWN_REPO#*/}")
           while IFS= read -r name; do
