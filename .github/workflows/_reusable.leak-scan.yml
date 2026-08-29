@@ -110,9 +110,14 @@ on:
         description: "IAM role ARN to assume (OIDC) for the deny-list read. Passed as a secret so the account-id-bearing ARN stays masked. Required when deny-list-ssm-param is set."
         required: false
 
-permissions:
-  contents: read
-  id-token: write   # OIDC, only used when deny-list-ssm-param is set
+# No `permissions:` block here, deliberately. A called workflow's permissions
+# must be a SUBSET of what the caller's job granted - declaring more fails the
+# run at startup before a single step executes. This workflow has two modes with
+# different needs (`contents: read` alone, or plus `id-token: write` for the
+# deny-list read), so a fixed block here would break one of them: `id-token:
+# write` would startup-fail every caller that only granted `contents: read`, and
+# `contents: read` alone would strip OIDC from every caller that needs it.
+# Callers grant what their mode needs - see the two examples in the header.
 
 jobs:
   scan:
