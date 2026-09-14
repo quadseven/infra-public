@@ -1,0 +1,9 @@
+# parity-case: R - a step name that reads like a curl command
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: curl the health endpoint -fsS
+        run: echo skipped

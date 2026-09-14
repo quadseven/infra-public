@@ -16,6 +16,7 @@ on:
       - ".github/**/*.sh"
       - ".github/scripts/workflow_hygiene.py"
       - ".github/scripts/workflow_hygiene_test.py"
+      - ".github/scripts/fixtures/**"
       - ".github/workflows/check.workflow-hygiene.yml"
   push:
     branches: [main]

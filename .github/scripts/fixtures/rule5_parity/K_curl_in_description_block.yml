@@ -1,0 +1,9 @@
+# parity-case: K - curl quoted in a description block scalar
+# canonical-rule5-lines: none
+on:
+  workflow_call:
+    inputs:
+      cmd:
+        description: |
+          Example: curl -fsSL https://example.invalid/ | sh
+        type: string

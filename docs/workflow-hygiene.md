@@ -16,8 +16,10 @@ The canonical, full rule set lives in the private fleet repo:
 `# hygiene: allow-*` exception-comment convention):
 
 1. SHA-pinning - every third-party `uses:` must be a full 40-hex commit SHA.
-5. curl timeouts - every real `curl` in a `run:` block needs `--max-time`/`-m`
-   and `--connect-timeout`.
+5. curl timeouts - every real `curl`, in any workflow field (not only `run:`
+   blocks) and in `.sh` files, needs `--max-time`/`-m` and `--connect-timeout`.
+   Its verdicts are checked against the canonical's over a shared corpus in
+   `.github/scripts/fixtures/rule5_parity/`.
 6. `set -e` in standalone shell scripts under `.github/`.
 7. per-job `timeout-minutes:` on any job with `runs-on:`.
 

@@ -1,0 +1,11 @@
+# parity-case: M - single-line description values naming curl flags, quoted and plain
+# canonical-rule5-lines: none
+on:
+  workflow_call:
+    inputs:
+      max-time:
+        description: "Per-request curl --max-time in seconds."
+        type: number
+      url:
+        description: Fetched with curl -fsS before the smoke check.
+        type: string

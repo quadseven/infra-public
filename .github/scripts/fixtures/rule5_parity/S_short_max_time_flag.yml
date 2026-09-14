@@ -1,0 +1,8 @@
+# parity-case: S - -m as the total-time bound
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: curl -fsS -m 10 --connect-timeout 5 https://example.invalid/

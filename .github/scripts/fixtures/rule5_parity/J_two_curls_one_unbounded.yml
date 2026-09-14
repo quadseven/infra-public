@@ -1,0 +1,10 @@
+# parity-case: J - two curls, the second unbounded
+# canonical-rule5-lines: 10
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL --max-time 30 --connect-timeout 5 https://example.invalid/a
+          curl -fsSL https://example.invalid/b

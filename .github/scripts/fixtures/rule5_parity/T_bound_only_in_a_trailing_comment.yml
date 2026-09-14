@@ -1,0 +1,9 @@
+# parity-case: T - the bounds appear only in a trailing comment
+# canonical-rule5-lines: 9
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsS https://example.invalid/  # --max-time 10 --connect-timeout 5

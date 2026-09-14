@@ -15,9 +15,12 @@ exception-comment conventions, so a contributor who knows one knows both):
   1. SHA-pinning: every third-party `uses:` must be a full 40-hex commit
      SHA, not a floating `@vN`/`@main` tag (supply-chain drift + the Node-20
      EOL problem #18 fixed).
-  5. curl timeouts: every real `curl` in a `run:` block needs both a
-     total-time bound (--max-time/-m) and a connect bound
-     (--connect-timeout). Exception: `# hygiene: allow-curl-no-timeout <reason>`.
+  5. curl timeouts: every real `curl` - in any field of a workflow, not
+     only `run:` blocks, and in `.sh` files - needs both a total-time bound
+     (--max-time/-m) and a connect bound (--connect-timeout). Exception:
+     `# hygiene: allow-curl-no-timeout <reason>`. Its verdicts are checked
+     against the canonical linter's over a shared corpus in
+     .github/scripts/fixtures/rule5_parity/ (infra#3866).
   6. set -e in standalone shell scripts: every `.sh` under .github/ must
      enable -e. Exception: `# hygiene: allow-no-set-e <reason>`.
   7. per-job timeout-minutes: every job with `runs-on:` must set
@@ -44,6 +47,7 @@ from pathlib import Path
 
 GITHUB_DIR = Path(".github")
 WF_DIR = GITHUB_DIR / "workflows"
+PARITY_DIR = GITHUB_DIR / "scripts" / "fixtures" / "rule5_parity"
 
 # Local composites (./.github/actions/...) and same-repo reusables have no
 # pinning concern; only owner/repo@ref refs are checked. `['"]?` before the
@@ -134,78 +138,81 @@ def code_part(line: str) -> str:
     return line
 
 
-# Literal (`|`) or folded (`>`) block scalar, with an optional chomping
-# indicator (`-`/`+`). Both are treated identically here - folding only
-# changes how newlines are interpreted at execution time, not whether a
-# `curl` call inside the block needs its timeout flags.
-RUN_BLOCK_RE = re.compile(r"^(\s*)run:\s*[|>][-+]?\s*$")
-# A single-line scalar: `run: <command>` with real content on the same
-# line (not `|`/`>`, which are handled above as block openers).
-RUN_INLINE_RE = re.compile(r"^(\s*)run:\s*(?![|>]([-+]?\s*$))(\S.*)$")
+# A `description:` block scalar (`|` or `>`) is prose: reusable and composite
+# inputs often quote an example command (`... | curl -fsS ...`) that never runs.
+DESC_BLOCK_RE = re.compile(r"^(\s*)description:\s*[|>]")
+# A single-line `description:` or `name:` value is prose in either quoting
+# style: `description: "Per-request curl --max-time in seconds."` documents the
+# input that SUPPLIES the bound. Deliberately NOT "only lines inside run:
+# scripts": callers pass real curl commands through other fields (a
+# `smoke-cmd: curl ...` input to a reusable that executes it), and those must
+# stay checked (infra#3866).
+PROSE_FIELD_RE = re.compile(r"^\s*(?:-\s*)?(?:description|name):\s*(?![|>])\S")
 
 
-def _run_block_line_numbers(lines: list[str]) -> set[int]:
-    """Return the 0-indexed line numbers that contain actual shell code -
-    inside a `run: |`/`run: >` YAML block scalar, or on a single-line
-    `run: <command>` scalar - as opposed to `name:`/`description:` field
-    text elsewhere in the file (a `description:` value can legally contain
-    the word "curl" as prose without being a real invocation)."""
-    in_block: set[int] = set()
+def _description_block_lines(lines: list[str]) -> set[int]:
+    """0-based indices of the lines inside a `description:` block scalar."""
+    inside: set[int] = set()
     i = 0
     n = len(lines)
     while i < n:
-        m = RUN_BLOCK_RE.match(lines[i])
-        if m:
-            key_indent = len(m.group(1))
+        m = DESC_BLOCK_RE.match(lines[i])
+        if not m:
             i += 1
-            while i < n and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > key_indent):
-                in_block.add(i)
-                i += 1
             continue
-        if RUN_INLINE_RE.match(lines[i]):
-            in_block.add(i)
+        indent = len(m.group(1))
         i += 1
-    return in_block
+        while i < n and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+            inside.add(i)
+            i += 1
+    return inside
+
+
+def _comment_run_above(lines: list[str], start: int) -> list[str]:
+    """The contiguous comment-only lines directly above line `start`. An
+    opt-out whose reason wraps onto more comment lines still counts; a blank
+    or code line ends the run."""
+    run: list[str] = []
+    k = start - 1
+    while k >= 0 and lines[k].strip().startswith("#"):
+        run.append(lines[k])
+        k -= 1
+    return run
 
 
 def lint_curl_timeouts(path: Path, text: str) -> list[str]:
-    """Rule 5. For each real `curl` invocation inside a `run:` scalar
-    (block `|`/`>` or single-line - never in YAML field text like
-    `name:`/`description:`), join continuation lines (trailing `\\`) so
-    a multi-line curl's flags are seen together, then require both timeout
-    flags unless the allow-marker is present on the curl line or anywhere in
-    the contiguous run of comment-only lines directly above it (a wrapped
-    multi-line reason is legitimate prose, not just a single fixed line)."""
+    """Rule 5. For each real `curl` invocation, in any field of a workflow or
+    anywhere in a `.sh`, join backslash-continued lines into one logical
+    command and require both a total-time bound and a connect bound, read
+    from code only (a bound in a trailing comment does not count). Skips a
+    curl that appears only in a comment, inside a `description:` block
+    scalar, or in a single-line `description:`/`name:` value, and one opted
+    out by the allow-marker on any line of the command or anywhere in the
+    comment lines directly above it."""
     errors: list[str] = []
     lines = text.splitlines()
-    run_lines = _run_block_line_numbers(lines)
+    desc_lines = _description_block_lines(lines)
+    n = len(lines)
     i = 0
-    while i < len(lines):
-        line = lines[i]
-        code = code_part(line)
-        if i in run_lines and CURL_RE.search(code):
-            joined = line
-            j = i
-            while joined.rstrip().endswith("\\") and j + 1 < len(lines):
-                j += 1
-                joined += "\n" + lines[j]
-            k = i - 1
-            comment_block: list[str] = []
-            while k >= 0 and lines[k].strip().startswith("#"):
-                comment_block.append(lines[k])
-                k -= 1
-            has_allow = bool(CURL_ALLOW_RE.search(line)) or any(
-                CURL_ALLOW_RE.search(c) for c in comment_block
+    while i < n:
+        code = code_part(lines[i])
+        if i in desc_lines or PROSE_FIELD_RE.match(lines[i]) or not CURL_RE.search(code):
+            i += 1
+            continue
+        start = i
+        joined = code
+        span = [lines[i]]
+        while code_part(lines[i]).rstrip().endswith("\\") and i + 1 < n:
+            i += 1
+            joined += " " + code_part(lines[i])
+            span.append(lines[i])
+        opted_out = any(CURL_ALLOW_RE.search(ln) for ln in span + _comment_run_above(lines, start))
+        if not opted_out and not (CURL_MAXTIME_RE.search(joined) and CURL_CONNTIMEOUT_RE.search(joined)):
+            errors.append(
+                f"{path}:{start + 1}: curl missing --max-time/-m and/or --connect-timeout "
+                f"(a stalled request hangs the step up to the job timeout) - add both, "
+                f"or mark `# hygiene: allow-curl-no-timeout <reason>`"
             )
-            if not has_allow and not (
-                CURL_MAXTIME_RE.search(joined) and CURL_CONNTIMEOUT_RE.search(joined)
-            ):
-                errors.append(
-                    f"{path}:{i + 1}: curl missing --max-time/-m and/or --connect-timeout "
-                    f"(a stalled request hangs the step up to the job timeout) - add both, "
-                    f"or mark `# hygiene: allow-curl-no-timeout <reason>`"
-                )
-            i = j
         i += 1
     return errors
 
@@ -295,6 +302,7 @@ def lint_file(path: Path) -> list[str]:
 
     if path.suffix == ".sh":
         errors.extend(lint_shell_script(path, text))
+        errors.extend(lint_curl_timeouts(path, text))
 
     if path.suffix == ".yml":
         errors.extend(lint_curl_timeouts(path, text))
@@ -309,7 +317,9 @@ def main() -> int:
     if WF_DIR.is_dir():
         targets.extend(sorted(WF_DIR.glob("*.yml")))
     if GITHUB_DIR.is_dir():
-        targets.extend(sorted(GITHUB_DIR.rglob("*.sh")))
+        # The Rule 5 parity corpus holds deliberately bad `.sh` cases: test
+        # data, not scripts this repo runs.
+        targets.extend(p for p in sorted(GITHUB_DIR.rglob("*.sh")) if PARITY_DIR not in p.parents)
 
     all_errors: list[str] = []
     for path in targets:
