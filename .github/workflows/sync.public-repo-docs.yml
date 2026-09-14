@@ -61,6 +61,9 @@ jobs:
           repository: quadseven/infra-public
           sparse-checkout: templates/public-repo
           sparse-checkout-cone-mode: false
+          # Full history: the guard below needs every published version of each
+          # template to tell a never-customized file from repo-specific content.
+          fetch-depth: 0
           path: canonical
 
       - name: Diff and stage update
@@ -69,9 +72,29 @@ jobs:
           set -euo pipefail
           changed=false
           for f in AGENTS.md CLAUDE.md; do
-            if ! cmp -s "canonical/templates/public-repo/$f" "target/$f" 2>/dev/null; then
+            canon="canonical/templates/public-repo/$f"
+            tgt="target/$f"
+            if cmp -s "$canon" "$tgt" 2>/dev/null; then
+              continue
+            fi
+            if [ ! -e "$tgt" ]; then
+              cp "$canon" "$tgt"
               changed=true
-              cp "canonical/templates/public-repo/$f" "target/$f"
+              continue
+            fi
+            # Replace only a file byte-identical to SOME published template
+            # version: the repo never customized it. Anything else is
+            # repo-specific, and cp would delete it (mod-overseer#110 was a
+            # +0/-122 deletion). Blob ids are collected before grep so that
+            # grep -q exiting early cannot fail the pipeline under pipefail.
+            tgt_blob=$(git hash-object --no-filters "$tgt")
+            known=$(git -C canonical log --format=%H -- "templates/public-repo/${f}" \
+              | while read -r c; do git -C canonical rev-parse "${c}:templates/public-repo/${f}" 2>/dev/null || true; done)
+            if grep -qx "$tgt_blob" <<<"$known"; then
+              cp "$canon" "$tgt"
+              changed=true
+            else
+              echo "::warning title=${f} not synced::${f} has repo-specific content, so infra-public policy updates will NOT reach this file. Its shared policy text stays frozen until it is reconciled by hand (see infra#3803)."
             fi
           done
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
@@ -128,7 +151,7 @@ jobs:
 
           Size: XS
 
-          Part of quadseven/infra#2953
+          Part of infra#2953
           EOF
           )
 
