@@ -9,6 +9,14 @@ name: sync · public-repo docs
 # don't exist yet) - nothing auto-merges, the target repo's own required
 # checks (Grug's DoR gate where present) apply same as any other PR.
 #
+# A target can carry its own content without freezing the shared policy. Both
+# templates end with a `<!-- repo-specific below -->` line. When a target file
+# has that line, only the part above it is replaced with the current template,
+# and everything from that line down is kept byte-for-byte. A target without
+# the line is replaced only if it is byte-identical to some published template
+# version; anything else is left alone, with a warning that says how to adopt
+# the marker (infra#3803).
+#
 # Consumed cross-repo as
 # uses: quadseven/infra-public/.github/workflows/sync.public-repo-docs.yml@<sha>
 # Caller grants contents: write, pull-requests: write.
@@ -70,6 +78,7 @@ jobs:
         id: diff
         run: |
           set -euo pipefail
+          marker='<!-- repo-specific below -->'
           changed=false
           for f in AGENTS.md CLAUDE.md; do
             canon="canonical/templates/public-repo/$f"
@@ -82,7 +91,26 @@ jobs:
               changed=true
               continue
             fi
-            # Replace only a file byte-identical to SOME published template
+            # A target with the marker line: the current template's text above
+            # ITS marker, then the target from its marker line down. head and
+            # tail keep bytes exactly (awk would add a missing final newline).
+            # `|| true` because grep finding no marker is not a failure here.
+            tgt_mark=$(grep -nxF -m1 -- "$marker" "$tgt" | cut -d: -f1 || true)
+            if [ -n "$tgt_mark" ]; then
+              canon_mark=$(grep -nxF -m1 -- "$marker" "$canon" | cut -d: -f1 || true)
+              {
+                if [ -n "$canon_mark" ]; then head -n "$((canon_mark - 1))" "$canon"; else cat "$canon"; fi
+                tail -n +"$tgt_mark" "$tgt"
+              } > "$tgt.synced"
+              if cmp -s "$tgt.synced" "$tgt"; then
+                rm -f "$tgt.synced"
+              else
+                mv "$tgt.synced" "$tgt"
+                changed=true
+              fi
+              continue
+            fi
+            # No marker: replace only a file byte-identical to SOME published template
             # version: the repo never customized it. Anything else is
             # repo-specific, and cp would delete it (mod-overseer#110 was a
             # +0/-122 deletion). Blob ids are collected before grep so that
@@ -94,7 +122,7 @@ jobs:
               cp "$canon" "$tgt"
               changed=true
             else
-              echo "::warning title=${f} not synced::${f} has repo-specific content, so infra-public policy updates will NOT reach this file. Its shared policy text stays frozen until it is reconciled by hand (see infra#3803)."
+              echo "::warning title=${f} not synced::${f} has repo-specific content and no '${marker}' line, so infra-public policy updates will NOT reach this file. To fix: put the current template at the top, then that line, then this repo's own content. From then on only the part above the line is synced (infra#3803)."
             fi
           done
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
@@ -133,14 +161,16 @@ jobs:
 
           ## What
 
-          Replaces this repo's root AGENTS.md and CLAUDE.md with the current
-          canonical copies, verbatim.
+          Replaces the synced part of this repo's root AGENTS.md and CLAUDE.md
+          with the current canonical text. The synced part is everything above
+          a `<!-- repo-specific below -->` line, or the whole file if it has no
+          such line. Anything from that line down is kept as it is.
 
           ## Acceptance criteria
 
-          - [ ] AGENTS.md matches quadseven/infra-public's canonical copy byte-for-byte
-          - [ ] CLAUDE.md matches quadseven/infra-public's canonical copy byte-for-byte
-          - [ ] No other file in this repo is touched
+          - [ ] AGENTS.md above the marker line matches quadseven/infra-public's canonical copy byte-for-byte
+          - [ ] CLAUDE.md above the marker line matches quadseven/infra-public's canonical copy byte-for-byte
+          - [ ] Nothing from a marker line down, and no other file in this repo, is touched
 
           ## Out of scope
 
