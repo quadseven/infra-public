@@ -16,6 +16,10 @@ Run: python3 .github/scripts/workflow_hygiene_test.py
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -311,6 +315,116 @@ class JobTimeouts(unittest.TestCase):
         errors = lint_job_timeouts(DUMMY, text)
         self.assertEqual(len(errors), 1)
         self.assertIn("job `test`", errors[0])
+
+
+class CurlOutsideRunBlocks(unittest.TestCase):
+    # infra#3866: the port used to check curl only inside `run:` scripts of
+    # `.yml` files.
+
+    def test_curl_passed_through_an_input_is_checked(self):
+        text = "\n".join([
+            "jobs:",
+            "  deploy:",
+            "    uses: ./.github/workflows/_reusable.deploy.yml",
+            "    with:",
+            "      smoke-cmd: curl -fsS --max-time 10 http://svc.invalid/healthz",
+        ])
+        errors = lint_curl_timeouts(DUMMY, text)
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_lint_file_checks_curl_in_a_workflow(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write("steps:\n  - run: curl -fsS https://example.invalid/\n")
+            path = Path(f.name)
+        try:
+            errors = lint_file(path)
+        finally:
+            path.unlink()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("curl missing", errors[0])
+
+    def test_lint_file_checks_curl_in_a_shell_script(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+            f.write("#!/bin/sh\nset -e\ncurl -fsS https://example.invalid/\n")
+            path = Path(f.name)
+        try:
+            errors = lint_file(path)
+        finally:
+            path.unlink()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("curl missing", errors[0])
+
+
+# --- Rule 5 parity with the canonical linter (infra#3866) ----------------
+#
+# One fixture per case under fixtures/rule5_parity/, each carrying the
+# canonical linter's verdict in a `# canonical-rule5-lines:` header (1-based
+# lines of the flagged curls, or `none`). The verdicts were recorded by
+# running the canonical linter over these files. With CANONICAL_HYGIENE_LINTER
+# pointing at its workflow_hygiene.py, the last test re-derives them live, so
+# a stale recording is caught too.
+
+PARITY_DIR = Path(__file__).parent / "fixtures" / "rule5_parity"
+PARITY_VERDICT_RE = re.compile(r"^# canonical-rule5-lines:\s*(.+?)\s*$", re.MULTILINE)
+# Bumped by hand when a case is added: a corpus that silently loads zero
+# cases must fail, never read as clean.
+PARITY_CASE_COUNT = 21
+
+
+def _parity_cases() -> list[tuple[str, str, tuple[int, ...]]]:
+    cases = []
+    for p in sorted(PARITY_DIR.iterdir()):
+        text = p.read_text()
+        m = PARITY_VERDICT_RE.search(text)
+        if not m:
+            raise ValueError(f"{p.name}: no `# canonical-rule5-lines:` header")
+        verdict = m.group(1)
+        expected = () if verdict == "none" else tuple(int(x) for x in verdict.split(","))
+        cases.append((p.name, text, expected))
+    return cases
+
+
+def _flagged_lines(errors: list[str]) -> tuple[int, ...]:
+    return tuple(sorted(int(re.match(r".*?:(\d+):", e).group(1)) for e in errors))
+
+
+class Rule5Parity(unittest.TestCase):
+    def test_the_corpus_loads_every_case(self):
+        n = len(_parity_cases())
+        print(f"rule 5 parity corpus: {n} case(s)", file=sys.stderr)
+        self.assertEqual(n, PARITY_CASE_COUNT)
+
+    def test_the_port_matches_the_recorded_canonical_verdicts(self):
+        cases = _parity_cases()
+        self.assertTrue(cases, "zero parity cases compared")
+        drift = [
+            f"{name}: port flags {list(got)}, canonical flags {list(expected)}"
+            for name, text, expected in cases
+            if (got := _flagged_lines(lint_curl_timeouts(Path(name), text))) != expected
+        ]
+        print(f"rule 5 parity: port vs recorded canonical, {len(cases)} case(s) compared", file=sys.stderr)
+        self.assertEqual(drift, [], "\n".join(drift))
+
+    def test_the_recorded_verdicts_match_the_live_canonical_linter(self):
+        linter = os.environ.get("CANONICAL_HYGIENE_LINTER")
+        if not linter:
+            self.skipTest("CANONICAL_HYGIENE_LINTER unset - the recorded verdicts stand in")
+        spec = importlib.util.spec_from_file_location("canonical_hygiene", linter)
+        self.assertTrue(spec and spec.loader, linter)
+        canon = importlib.util.module_from_spec(spec)
+        # Registered first: the canonical declares a dataclass, and
+        # dataclasses looks its module up in sys.modules while building it.
+        sys.modules["canonical_hygiene"] = canon
+        spec.loader.exec_module(canon)
+        cases = _parity_cases()
+        self.assertTrue(cases, "zero parity cases compared")
+        drift = [
+            f"{name}: recorded {list(expected)}, canonical now {list(live)}"
+            for name, text, expected in cases
+            if (live := _flagged_lines(canon.lint_curl_timeouts(Path(name), text))) != expected
+        ]
+        print(f"rule 5 parity: live canonical vs recorded, {len(cases)} case(s) compared", file=sys.stderr)
+        self.assertEqual(drift, [], "\n".join(drift))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+# parity-case: N - opt-out marker whose reason wraps onto more comment lines
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          # hygiene: allow-curl-no-timeout both flags are set in args[] above
+          # (--max-time "$MAX_TIME" --connect-timeout 10) - a static linter
+          # can't trace the array back to this call.
+          resp=$(curl "${args[@]}" -w '%{http_code}' "$url" || true)

@@ -1,0 +1,9 @@
+# parity-case: L - curl mentioned only in a comment
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # this step used to curl -fsSL https://example.invalid/ directly
+      - run: echo hi

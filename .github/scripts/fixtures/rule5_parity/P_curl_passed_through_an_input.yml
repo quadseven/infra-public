@@ -1,0 +1,7 @@
+# parity-case: P - curl passed through a non-run input to a reusable that executes it
+# canonical-rule5-lines: 7
+jobs:
+  deploy:
+    uses: ./.github/workflows/_reusable.deploy.yml
+    with:
+      smoke-cmd: curl -fsS --max-time 10 --retry 3 http://svc.invalid/healthz

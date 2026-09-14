@@ -1,0 +1,10 @@
+# parity-case: I - opt-out marker on the line above
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          # hygiene: allow-curl-no-timeout bounded by the step timeout
+          curl -fsSL -o /tmp/x https://example.invalid/

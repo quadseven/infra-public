@@ -1,0 +1,12 @@
+# parity-case: F - one bound on each of two continuation lines
+# canonical-rule5-lines: none
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL \
+            --max-time 120 \
+            --connect-timeout 10 \
+            -o /tmp/x https://example.invalid/

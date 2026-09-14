@@ -1,0 +1,11 @@
+# parity-case: G - only --max-time, on a continuation line
+# canonical-rule5-lines: 9
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL \
+            --max-time 120 \
+            -o /tmp/x https://example.invalid/
