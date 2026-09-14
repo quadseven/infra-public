@@ -16,6 +16,13 @@ name: _reusable · Python check (ruff + pytest)
 # Consumed cross-repo as
 # `uses: quadseven/infra-public/.github/workflows/check.python.yml@<sha>`.
 # All actions SHA-pinned.
+#
+# Datadog Test Optimization is opt-in: set `datadog-civisibility-service`
+# and pass the `DD_API_KEY` secret, and the test step runs with ddtrace's
+# pytest plugin in agentless mode. Without that, a project that depends on
+# ddtrace still gets the plugin auto-loaded, in agent mode; it finds no
+# agent on the runner and drops every test event while the job stays
+# green. Left empty (the default), the test step is exactly as before.
 
 on:
   workflow_call:
@@ -75,6 +82,20 @@ on:
         required: false
         type: number
         default: 15
+      datadog-civisibility-service:
+        description: "Opt in to Datadog Test Optimization: the service name test events are reported under ([A-Za-z0-9_.-]). Empty (default) = off, and the test step runs exactly as before with no DD_* variables set. When set, pass the DD_API_KEY secret too; the test process can read it, so pass an API key, never an application key."
+        required: false
+        type: string
+        default: ""
+      datadog-site:
+        description: "Datadog site (DD_SITE) for Test Optimization. Used only when datadog-civisibility-service is set."
+        required: false
+        type: string
+        default: "datadoghq.com"
+    secrets:
+      DD_API_KEY:
+        description: "Datadog API key for Test Optimization. Used only when datadog-civisibility-service is set."
+        required: false
 
 permissions:
   contents: read
@@ -164,5 +185,48 @@ jobs:
           # shellcheck disable=SC2086
           $RUFF format --check $LINT_PATHS
       - name: "Test"
-        if: ${{ inputs.test-cmd != '' }}
+        if: ${{ inputs.test-cmd != '' && inputs.datadog-civisibility-service == '' }}
+        run: ${{ inputs.test-cmd }}
+      # Datadog Test Optimization (opt-in). Separate steps, so a caller that
+      # leaves the input empty gets the step above unchanged, with no DD_*
+      # variable defined at all: an empty DD_SERVICE is not the same as an
+      # unset one to the caller's own code.
+      - name: "Check the Datadog Test Optimization settings"
+        if: ${{ inputs.test-cmd != '' && inputs.datadog-civisibility-service != '' }}
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          SERVICE: ${{ inputs.datadog-civisibility-service }}
+          SITE: ${{ inputs.datadog-site }}
+          FORK_PR: ${{ github.event.pull_request.head.repo.fork == true }}
+        run: |
+          set -euo pipefail
+          case "$SERVICE" in
+            *[!A-Za-z0-9_.-]*)
+              echo "::error::datadog-civisibility-service must be [A-Za-z0-9_.-]; got: $SERVICE"
+              exit 1 ;;
+          esac
+          case "$SITE" in
+            ""|*[!A-Za-z0-9.-]*)
+              echo "::error::datadog-site must be a hostname; got: $SITE"
+              exit 1 ;;
+          esac
+          if [ -z "$DD_API_KEY" ]; then
+            # A fork's pull request never receives secrets: warn, and let
+            # the tests run without reporting.
+            if [ "$FORK_PR" = "true" ]; then
+              echo "::warning::DD_API_KEY is not available to a fork's pull request: the tests run, and Datadog gets no test events from this run."
+            else
+              echo "::error::datadog-civisibility-service is set but the DD_API_KEY secret is empty. Pass it (secrets: inherit, or secrets: { DD_API_KEY: ... }); without it every test event is dropped while the job stays green."
+              exit 1
+            fi
+          fi
+      - name: "Test (Datadog Test Optimization)"
+        if: ${{ inputs.test-cmd != '' && inputs.datadog-civisibility-service != '' }}
+        env:
+          DD_CIVISIBILITY_AGENTLESS_ENABLED: "true"
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: ${{ inputs.datadog-site }}
+          DD_ENV: ci
+          DD_SERVICE: ${{ inputs.datadog-civisibility-service }}
+          DD_VERSION: ${{ github.sha }}
         run: ${{ inputs.test-cmd }}
