@@ -30,6 +30,23 @@ contributor who knows one knows both):
      instead of `runs-on:`) is exempt. Exception:
      `# hygiene: allow-no-timeout-minutes <reason>`.
 
+LOCAL-ONLY, no canonical counterpart - this repo enforces one rule the
+canonical set does not have, so it is numbered off the canonical scheme:
+
+ 1b. EOL Node major detection (#18). A SHA-pinned action whose `# vN`
+     comment names a known-EOL major (`actions/checkout` v4,
+     `actions/setup-node` v4) passes the Rule 1 SHA check but still runs on
+     Node-20. Implemented at PIN_COMMENT_RE / EOL_MAJOR and enforced in the
+     `uses:` scan below. The comment is reduced to its bare major before the
+     lookup, so `# v4.2.2` cannot evade the `{"v4"}` table (#72, same
+     failure mode as #64).
+
+     It is listed here because a ledger that accounts only for canonical
+     rules cannot account for this file's own behaviour: a reader counting
+     entries against the canonical twelve would find an enforced rule in
+     none of them. Having no canonical number is exactly why it goes stale
+     quietly - there is no upstream change to prompt a re-read.
+
 Deliberately NOT ported - infra-specific, would be dead code or actively
 wrong here: dead-cluster reference checking (Rule 2 - k8s-ts is a
 private-infra teardown artifact) and ARC-runner-routing policy (Rule 4 -

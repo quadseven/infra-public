@@ -24,6 +24,22 @@ on 2026-07-08). It has **twelve** rules as of 2026-09-15.
 6. `set -e` in standalone shell scripts under `.github/`.
 7. per-job `timeout-minutes:` on any job with `runs-on:`.
 
+### Local-only, with no canonical counterpart
+
+One rule is this repo's own and is numbered off the canonical scheme:
+
+- **1b.** EOL Node major detection (#18) - a SHA-pinned action whose `# vN`
+  comment names a known-EOL major (`actions/checkout` v4,
+  `actions/setup-node` v4) passes the Rule 1 SHA check but still runs on
+  Node-20. The comment is reduced to its bare major before the lookup, so
+  `# v4.2.2` cannot evade the `{"v4"}` table (#72, same failure mode as #64).
+
+It is listed because a ledger that accounts only for *canonical* rules cannot
+account for this file's own behaviour - someone counting entries against the
+canonical twelve would find an enforced rule in none of the three lists.
+Having no canonical number is precisely why it goes stale quietly: no upstream
+change ever prompts a re-read of it.
+
 Deliberately **not** ported - each would be dead or wrong code here:
 
 - **Rule 2** dead-cluster reference checking - k8s-ts is a private-infra
