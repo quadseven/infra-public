@@ -1,0 +1,300 @@
+name: _reusable · Leak scan (PR diff + PR text)
+
+# PURPOSE: a public repo must not publish private-infrastructure identifiers -
+#   hostnames, private-range IPs, device identifiers, local user paths,
+#   cross-repo refs naming a private repo, or a real person's name. This is the
+#   per-PR enforcement of templates/public-repo/AGENTS.md, which until now was a
+#   policy document with nothing behind it.
+#
+# WHY IT EXISTS. Every public repo in the fleet was checked for a per-PR leak
+#   check and none had one. Each leak fix had therefore been a one-time manual
+#   scrub, so scrubbed branches kept sitting next to unscrubbed siblings, and a
+#   repo that HAD been audited twice was still carrying a personal name. None of
+#   it is secret-SHAPED, so GitHub's secret scanning has no opinion on any of
+#   it: what leaks is topology and identity, not credentials.
+#
+# WHAT IT SCANS. The PR diff AND the PR title/body. The second half is not
+#   incidental - most of what this exists to stop was written in prose, in an
+#   issue or a PR description, where no code scanner would ever look. The PR
+#   text reaches the scanner through a FILE fed by env, never interpolated into
+#   the run body: a PR title is attacker-controlled text and `${{ }}` inside a
+#   `run:` is a shell injection.
+#
+# WHERE THE SCRIPT COMES FROM. One copy, in this repo, fetched at `scanner-ref`
+#   (default `main`). Not vendored per repo: a scanner copied into 17 repos is 17
+#   copies to fix when a pattern is wrong, which is the same "one-time manual fix
+#   that never propagates" failure this workflow exists to end. Taking it from
+#   `main` is what makes a pattern fix reach every consumer without re-pinning 17
+#   callers, and `main` is itself gated by the scanner's fixture suite
+#   (check.leak-scan-guard.yml) plus this repo's own leak-scan caller.
+#
+#   The tradeoff is real and deliberate: a caller that pins `uses: ...@<sha>` for
+#   the workflow still gets the CURRENT patterns, so infra-public's main can
+#   change what a pinned consumer's check does. Pin `scanner-ref` to a SHA to
+#   opt out of that. It cannot be resolved automatically: `github.job_workflow_sha`
+#   would be exactly the right value, but it is empty in a called workflow's job
+#   context (only the OIDC token carries that claim), and defaulting to "the
+#   workflow's own revision" silently could not be done at all - which is why
+#   this is an input a human sets rather than a guess.
+#
+# THE DENY-LIST IS OPTIONAL, ON PURPOSE. The generic shapes below need no
+#   credentials, which is why they are the default - a guard that needs AWS auth
+#   to run at all is a guard that repos skip. Terms with no generic shape
+#   (products, projects, PEOPLE) cannot be listed in a public file without being
+#   the leak they prevent, so they are read from SSM at runtime via
+#   `deny-list-ssm-param` + the `aws-role-arn` secret. Repos with no AWS auth run
+#   layer 1 alone and are still covered for every shape.
+#
+# FAIL CLOSED. Every failure to SCAN is a red check, never a green one:
+#   unresolvable scanner revision, missing scanner file, a `git diff` that
+#   errors, an empty diff on a PR that changed files, a deny-list parameter that
+#   is set but unreadable or empty. A guard that degrades to green certifies a
+#   leak instead of catching it - that is the exact failure this workflow was
+#   filed about. `enforce: false` softens FINDINGS only (exit 1) for a first
+#   rollout; it never softens a scanner that could not run (exit 2+).
+#
+# Consumed cross-repo as
+# `uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>`.
+# All actions SHA-pinned.
+#
+# Example caller (thin wrapper in the consuming repo, .github/workflows/leak-scan.yml):
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, edited]
+#   jobs:
+#     leak-scan:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
+#       permissions: { contents: read }   # the caller owns permissions - see below
+#       # with: { scanner-ref: <sha> }    # optional: pin the patterns too
+#
+# Example caller WITH the deny-list layer (needs OIDC + a role that can read
+# exactly that one parameter):
+#   jobs:
+#     leak-scan:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
+#       permissions: { contents: read, id-token: write }
+#       with:
+#         deny-list-ssm-param: /path/to/the/deny-list/parameter
+#       secrets:
+#         aws-role-arn: ${{ secrets.LEAK_SCAN_ROLE_ARN }}
+
+on:
+  workflow_call:
+    inputs:
+      allowed-repo-refs:
+        description: "Comma-separated repo names whose `<name>#123` refs are fine. The calling repo's own name is always allowed and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
+        required: false
+        type: string
+        default: ""
+      deny-list-ssm-param:
+        description: "SSM parameter holding whitespace-separated terms with no generic shape (products, projects, people). Empty = generic shapes only. When set, the aws-role-arn secret is REQUIRED and an unreadable or empty parameter fails the check."
+        required: false
+        type: string
+        default: ""
+      aws-region:
+        description: "AWS region for the deny-list SSM read."
+        required: false
+        type: string
+        default: "us-east-1"
+      enforce:
+        description: "true = a finding fails the check. false = a finding is a warning annotation only (first-rollout mode). A scanner that CANNOT RUN fails the check either way."
+        required: false
+        type: boolean
+        default: true
+      scanner-ref:
+        description: "infra-public revision to take the scanner from. Default `main` = pattern fixes reach every consumer without re-pinning. Set a SHA to pin the patterns as well as the workflow. infra-public's own caller passes its PR head SHA, so a scanner change is tested by the guard it changes."
+        required: false
+        type: string
+        default: "main"
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 10
+    secrets:
+      aws-role-arn:
+        description: "IAM role ARN to assume (OIDC) for the deny-list read. Passed as a secret so the account-id-bearing ARN stays masked. Required when deny-list-ssm-param is set."
+        required: false
+
+# No `permissions:` block here, deliberately. A called workflow's permissions
+# must be a SUBSET of what the caller's job granted - declaring more fails the
+# run at startup before a single step executes. This workflow has two modes with
+# different needs (`contents: read` alone, or plus `id-token: write` for the
+# deny-list read), so a fixed block here would break one of them: `id-token:
+# write` would startup-fail every caller that only granted `contents: read`, and
+# `contents: read` alone would strip OIDC from every caller that needs it.
+# Callers grant what their mode needs - see the two examples in the header.
+
+jobs:
+  scan:
+    name: Scan diff and PR text for private identifiers
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Keyed on the caller's workflow + PR: superseded pushes to the same PR are
+    # cancelled, but two different callers' guards never cancel each other.
+    concurrency:
+      group: leak-scan-${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: "1. Refuse to run outside a pull_request event"
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # pull_request_target is deliberately NOT accepted: it runs with the
+          # base repo's token against attacker-authored head content, and this
+          # workflow reads that content. A guard is not worth a token leak.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "::error::leak scan supports pull_request only (got '$EVENT'). pull_request_target is refused by design."
+            exit 1
+          fi
+
+      - name: "2. Checkout the calling repo (full history: the base commit must be diffable)"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          path: _repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "3. Resolve which infra-public revision the scanner comes from"
+        id: scanner-rev
+        env:
+          SCANNER_REF: ${{ inputs.scanner-ref }}
+        run: |
+          set -euo pipefail
+          ref="$SCANNER_REF"
+          # An empty ref would make the next step check out the default branch
+          # by accident rather than by decision. Say so instead.
+          if [ -z "$ref" ]; then
+            echo "::error::scanner-ref is empty. Pass a branch, tag or SHA (default is 'main')."
+            exit 1
+          fi
+          # This value becomes a checkout `ref:`. It comes from the caller's own
+          # workflow file, which is trusted - but a ref is still the wrong place
+          # to be relaxed, so anything outside a git ref's character set is
+          # refused rather than passed through.
+          if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::scanner-ref '$ref' contains characters that are not valid in a git ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "scanner will be taken from quadseven/infra-public@$ref"
+
+      - name: "4. Fetch the scanner at that revision"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          ref: ${{ steps.scanner-rev.outputs.ref }}
+          sparse-checkout: .github/scripts/check_private_leaks.py
+          sparse-checkout-cone-mode: false
+          path: _scanner
+          persist-credentials: false
+
+      - name: "5. Prove the scanner arrived before trusting a green result"
+        env:
+          SCANNER: ${{ github.workspace }}/_scanner/.github/scripts/check_private_leaks.py
+        run: |
+          set -euo pipefail
+          # A sparse-checkout that matched nothing leaves an empty directory and
+          # exits 0. Without this, the next step would fail on a missing file -
+          # but with a message about python, not about the guard being absent.
+          if [ ! -s "$SCANNER" ]; then
+            echo "::error::the leak scanner was not fetched (expected $SCANNER). Failing closed."
+            exit 1
+          fi
+          python3 "$SCANNER" --help > /dev/null
+
+      - name: "6. Refuse a deny-list with no credentials to read it"
+        if: inputs.deny-list-ssm-param != ''
+        env:
+          ROLE: ${{ secrets.aws-role-arn }}
+        # Checked in a run step, not an `if:` - the `secrets` context is not
+        # available to a step-level `if:` expression.
+        run: |
+          set -euo pipefail
+          if [ -z "$ROLE" ]; then
+            echo "::error::deny-list-ssm-param is set but the aws-role-arn secret is empty. Running generic-shapes-only here would silently drop the layer that matches people and products, so this fails instead."
+            exit 1
+          fi
+
+      - name: "7. Assume the deny-list read role"
+        if: inputs.deny-list-ssm-param != ''
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d  # v6.2.2
+        with:
+          role-to-assume: ${{ secrets.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: "8. Scan the PR diff and the PR title/body"
+        working-directory: _repo
+        env:
+          SCANNER: ${{ github.workspace }}/_scanner/.github/scripts/check_private_leaks.py
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          OWN_REPO: ${{ github.repository }}
+          EXTRA_REFS: ${{ inputs.allowed-repo-refs }}
+          DENY_PARAM: ${{ inputs.deny-list-ssm-param }}
+          ENFORCE: ${{ inputs.enforce }}
+          # Attacker-controlled text. It is written to a file below and never
+          # interpolated into a command.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # This repo's own `<name>#123` refs are always fine; anything else in
+          # that shape may be naming a private repo.
+          args=(--allow-repo-ref "${OWN_REPO#*/}")
+          while IFS= read -r name; do
+            name="${name//[[:space:]]/}"     # tolerate "a, b" as well as "a,b"
+            if [ -n "$name" ]; then
+              args+=(--allow-repo-ref "$name")
+            fi
+          done < <(printf '%s\n' "$EXTRA_REFS" | tr ',' '\n')
+          if [ -n "$DENY_PARAM" ]; then
+            args+=(--deny-list-ssm "$DENY_PARAM")
+          fi
+
+          # Three-dot: the merge base to head, which is what GitHub itself calls
+          # the PR's changes. Two-dot would also surface commits the base branch
+          # gained after the PR forked.
+          diff_args=(--diff "${BASE_SHA}...${HEAD_SHA}")
+          # If GitHub says this PR changed files, a scan that sees an empty diff
+          # did not find nothing - it looked at nothing, and must not report
+          # clean. (Shallow clone / unfetched base is the usual cause.)
+          if [ "${CHANGED_FILES:-0}" -gt 0 ] 2>/dev/null; then
+            diff_args+=(--require-changes)
+          fi
+
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr-text.md"
+
+          rc_diff=0
+          echo "--- PR diff ---"
+          python3 "$SCANNER" "${diff_args[@]}" "${args[@]}" || rc_diff=$?
+          rc_text=0
+          echo "--- PR title and body ---"
+          python3 "$SCANNER" --text-file "$RUNNER_TEMP/pr-text.md" "${args[@]}" || rc_text=$?
+
+          # Exit-code contract (see the scanner's docstring):
+          #   0 clean | 1 findings | 2+ could not scan.
+          # Only 1 is softenable, and only when the caller asked for warn mode.
+          worst=$(( rc_diff > rc_text ? rc_diff : rc_text ))
+          case "$worst" in
+            0) echo "leak scan: clean" ;;
+            1)
+              if [ "$ENFORCE" = "true" ]; then
+                echo "::error::leak scan found private identifiers in this PR (see the output above). Rewrite them generically, or mark a deliberate one with 'leak-guard-allow' on that line."
+                exit 1
+              fi
+              echo "::warning::leak scan found private identifiers in this PR. This caller runs in warn mode (enforce: false), so the check is green - fix them before enforce is turned on."
+              ;;
+            *)
+              echo "::error::the leak scanner could not complete (exit $worst). Failing closed: a guard that goes green when it cannot scan certifies the leak it was meant to catch."
+              exit 1
+              ;;
+          esac
