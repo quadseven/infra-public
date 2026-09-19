@@ -7,10 +7,11 @@ by every consumer with nothing local to catch it - #18 (Node-20-era action
 pins that still passed a SHA-only check) was found and fixed only by a
 manual audit, not by any gate.
 
-The canonical rule set lives in `infrastructure/.github/scripts/
-workflow_hygiene.py` (the private fleet repo) and has seven rules. Four are
-genuinely repo-agnostic and ported here verbatim (same regexes, same
-exception-comment conventions, so a contributor who knows one knows both):
+The canonical rule set lives in `infra/.github/scripts/workflow_hygiene.py`
+(the private fleet repo; renamed from `infrastructure` 2026-07-08) and has
+TWELVE rules as of 2026-09-15. Four are genuinely repo-agnostic and ported
+here verbatim (same regexes, same exception-comment conventions, so a
+contributor who knows one knows both):
 
   1. SHA-pinning: every third-party `uses:` must be a full 40-hex commit
      SHA, not a floating `@vN`/`@main` tag (supply-chain drift + the Node-20
@@ -29,11 +30,59 @@ exception-comment conventions, so a contributor who knows one knows both):
      instead of `runs-on:`) is exempt. Exception:
      `# hygiene: allow-no-timeout-minutes <reason>`.
 
+LOCAL-ONLY, no canonical counterpart - this repo enforces one rule the
+canonical set does not have, so it is numbered off the canonical scheme:
+
+ 1b. EOL Node major detection (#18). A SHA-pinned action whose `# vN`
+     comment names a known-EOL major (`actions/checkout` v4,
+     `actions/setup-node` v4) passes the Rule 1 SHA check but still runs on
+     Node-20. Implemented at PIN_COMMENT_RE / EOL_MAJOR and enforced in the
+     `uses:` scan below. The comment is reduced to its bare major before the
+     lookup, so `# v4.2.2` cannot evade the `{"v4"}` table (#72, same
+     failure mode as #64).
+
+     It is listed here because a ledger that accounts only for canonical
+     rules cannot account for this file's own behaviour: a reader counting
+     entries against the canonical twelve would find an enforced rule in
+     none of them. Having no canonical number is exactly why it goes stale
+     quietly - there is no upstream change to prompt a re-read.
+
 Deliberately NOT ported - infra-specific, would be dead code or actively
-wrong here: dead-cluster reference checking (k8s-ts is a private-infra
-teardown artifact) and ARC-runner-routing policy (infra-public's own CI
-uses plain GitHub-hosted runners, see check.spark-cave.yml - there is no
-ARC fleet-routing concept in this repo).
+wrong here: dead-cluster reference checking (Rule 2 - k8s-ts is a
+private-infra teardown artifact) and ARC-runner-routing policy (Rule 4 -
+infra-public's own CI uses plain GitHub-hosted runners, see
+check.spark-cave.yml - there is no ARC fleet-routing concept in this repo).
+
+NOT YET DISPOSITIONED - tracked in #71. Neither ported nor deliberately
+rejected; nobody has written down which they should be. Listed so the gap is
+visible rather than silent. This is the open question, NOT a decision:
+
+  3. environment-scoped secrets. Not hypothetical here: #51
+     ("build.container-multiarch.yml consumes the env-scoped ECR OIDC role
+     without an environment input") was a live instance in this repo, found
+     by hand rather than by this gate.
+  8. working-tree branch switch before a local action. A bare
+     `git checkout <branch>` deletes `.github/` from the working tree, so
+     every later `uses: ./...` dies. No live violation here today.
+  9. GHA template injection in `run:` blocks. An interpolated `${{ }}`
+     reaches the shell as script TEXT, so quoting cannot save it.
+ 10. PR-preview reachability for auto-applying stacks. Scoped upstream to
+     `iac.pulumi.*.yml`; this repo has no Pulumi at all, so likely
+     not-applicable rather than undecided - but say so explicitly.
+ 11. one version label per pinned action. Reinforces Rule 1, which IS
+     ported, so this is the strongest port candidate of the six.
+ 12. no `gh` CLI in an arc-pool job. Same reasoning as Rule 4's rejection -
+     this repo has no ARC pool.
+
+Deciding these six - and recording HOW this ledger stays current - is the
+remaining work in #71. Note the count above is a hand-copied fact with no
+local anchor: it has now been wrong three times (seven, then a correction to
+nine, then one to ten, each overtaken before merging). The durable guard
+cannot live here, because visibility only runs one way: `infra` is private,
+so this repo's CI can never read it, while `infra` can read this public one.
+The assertion belongs upstream, next to `rule_census()` /
+`TestRuleListMatchesImplementation`, which already guard the canonical list
+against the canonical code and need only extend one step outward.
 
 Run locally:  python3 .github/scripts/workflow_hygiene.py
 Exit 0 = clean; exit 1 = violations (printed as ::error:: for CI annotation).

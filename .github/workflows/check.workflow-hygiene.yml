@@ -1,7 +1,7 @@
 name: check · workflow hygiene
 
 # Lints infra-public's own .github/workflows/*.yml against the four
-# repo-agnostic rules ported from the fleet's canonical infrastructure/
+# repo-agnostic rules ported from the fleet's canonical infra/
 # .github/scripts/workflow_hygiene.py (infra-public#46 - see docs/
 # workflow-hygiene.md for how the two stay in sync). infra-public is the
 # shared reusable-workflow library every fleet repo inherits, so drift
