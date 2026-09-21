@@ -12,6 +12,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { findUncheckedItems } = require("./parse.js");
+const { parseChecklist, classify } = require("./parse.js");
 
 test("checked item is not returned", () => {
   const body = "## Acceptance criteria\n\n- [x] done thing\n";
@@ -185,4 +186,82 @@ test("a body with no checkboxes at all returns an empty list", () => {
 test("asterisk bullets are recognized the same as hyphen bullets", () => {
   const body = "* [ ] an asterisk-style unchecked item";
   assert.deepEqual(findUncheckedItems(body), ["an asterisk-style unchecked item"]);
+});
+
+// infra#3125: "nothing unchecked" is two different facts. Every criterion met
+// and no criteria at all both used to read as a pass, so an issue written in
+// prose opted out of the guard while the guard reported success.
+
+test("total counts checked and unchecked items", () => {
+  const body = "## Acceptance criteria\n\n- [x] a\n- [X] b\n- [ ] c\n";
+  assert.deepEqual(parseChecklist(body), { unchecked: ["c"], total: 3 });
+});
+
+test("consecutive unchecked bullets each count once", () => {
+  const body = "## Acceptance criteria\n- [ ] one\n- [ ] two\n- [ ] three\n";
+  assert.equal(parseChecklist(body).total, 3);
+});
+
+test("a wrapped multi-line bullet counts once", () => {
+  const body = "## Acceptance criteria\n\n- [ ] first line\n  continued here\n";
+  assert.equal(parseChecklist(body).total, 1);
+});
+
+test("a prose-only body has no criteria", () => {
+  const body = "## What\n\nThe thing is broken. Fix it so that it works.\n";
+  assert.deepEqual(parseChecklist(body), { unchecked: [], total: 0 });
+  assert.equal(classify(body).state, "no-criteria");
+});
+
+test("empty, null and undefined bodies have no criteria", () => {
+  for (const body of ["", null, undefined]) {
+    assert.equal(classify(body).state, "no-criteria");
+  }
+});
+
+test("checkboxes inside a fenced code block are not criteria", () => {
+  const body = "Example template:\n\n```\n- [ ] not a real criterion\n- [x] nor this\n```\n";
+  assert.equal(parseChecklist(body).total, 0);
+  assert.equal(classify(body).state, "no-criteria");
+});
+
+test("checkboxes under Out of scope do not make a criteria-free issue look complete", () => {
+  const body = "## What\n\nProse only.\n\n## Out of scope\n\n- [x] later thing\n- [ ] other thing\n";
+  assert.equal(parseChecklist(body).total, 0);
+  assert.equal(classify(body).state, "no-criteria");
+});
+
+test("an unchecked Out of scope item does not block a complete issue", () => {
+  const body = "## Acceptance criteria\n\n- [x] done\n\n## Out of scope\n\n- [ ] later\n";
+  assert.deepEqual(classify(body), { state: "all-checked", unchecked: [], total: 1 });
+});
+
+test("classify: some unchecked is open-items", () => {
+  const body = "## Acceptance criteria\n\n- [x] a\n- [ ] b\n";
+  assert.deepEqual(classify(body), { state: "open-items", unchecked: ["b"], total: 2 });
+});
+
+test("classify: all checked is all-checked", () => {
+  const body = "## Acceptance criteria\n\n- [x] a\n- [x] b\n";
+  assert.deepEqual(classify(body), { state: "all-checked", unchecked: [], total: 2 });
+});
+
+test("findUncheckedItems is unchanged for a criteria-free body", () => {
+  assert.deepEqual(findUncheckedItems("Just prose."), []);
+});
+
+const { noCriteriaNote, hasNoCriteriaNote, NO_CRITERIA_MARKER } = require("./parse.js");
+
+test("the no-criteria note carries its marker and says nothing was verified", () => {
+  const note = noCriteriaNote();
+  assert.ok(note.includes(NO_CRITERIA_MARKER));
+  assert.match(note, /no acceptance criteria to verify/);
+  assert.match(note, /force-close/);
+});
+
+test("hasNoCriteriaNote finds the marker and ignores everything else", () => {
+  assert.equal(hasNoCriteriaNote([{ body: noCriteriaNote() }]), true);
+  assert.equal(hasNoCriteriaNote([{ body: "hello" }, { body: null }, {}]), false);
+  assert.equal(hasNoCriteriaNote([]), false);
+  assert.equal(hasNoCriteriaNote(undefined), false);
 });

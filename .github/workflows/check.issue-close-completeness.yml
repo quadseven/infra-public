@@ -2,6 +2,11 @@ name: _reusable · issue-close completeness guard
 
 # Reopens an issue closed as COMPLETED while it still has unchecked
 # acceptance/test checkboxes — so issues can't be marked done with open items.
+# An issue with NO checkbox criteria at all is not a pass either (infra#3125):
+# the guard examined nothing, so it posts a single note saying the close was
+# not verified, and does not reopen (an issue without checkboxes is legitimate
+# to have). Three states: open items -> reopen, all checked -> stands,
+# no criteria -> note.
 # Escape hatches: close as "not planned" (state_reason=not_planned), or add a
 # `force-close`/`wontfix` label. Exempt sections (Out of scope / Blocked by /
 # Reverse-if-wrong / Candidate / Further notes) are NOT counted.
@@ -57,7 +62,7 @@ jobs:
         with:
           script: |
             const path = require("path");
-            const { findUncheckedItems } = require(
+            const { classify, noCriteriaNote, hasNoCriteriaNote } = require(
               path.join(process.env.GITHUB_WORKSPACE, "_close-completeness-guard-src",
                 ".github", "scripts", "close-completeness", "parse.js")
             );
@@ -73,10 +78,29 @@ jobs:
               return;
             }
 
-            const uncheckedItems = findUncheckedItems(issue.body || "");
+            const { state, unchecked: uncheckedItems } = classify(issue.body || "");
 
-            if (uncheckedItems.length === 0) {
-              core.info("no open acceptance/test items — close stands");
+            if (state === "all-checked") {
+              core.info("every acceptance/test item is checked — close stands");
+              return;
+            }
+
+            if (state === "no-criteria") {
+              // Nothing was examined, so this is neither a pass nor a reopen
+              // (infra#3125): say so once, so the close does not read as verified.
+              const existing = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number, per_page: 100,
+              });
+              if (hasNoCriteriaNote(existing)) {
+                core.info("no-criteria note already posted");
+                return;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number, body: noCriteriaNote(),
+              });
+              core.warning(`#${issue.number} closed as completed with no checkbox criteria — nothing was verified`);
               return;
             }
 

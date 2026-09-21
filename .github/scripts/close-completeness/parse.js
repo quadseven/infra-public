@@ -13,16 +13,21 @@
 // force-close/wontfix labels).
 
 /**
- * Return the list of unchecked (`- [ ]`) acceptance/test items in an issue
- * body, skipping fenced code blocks and exempt sections (Out of scope /
- * Blocked by / Reverse-if-wrong / Candidate / Further notes). Each item is
- * capped at 150 characters and multi-line (continuation-wrapped) bullets
- * are tracked across lines.
+ * Parse the checklist in an issue body: the unchecked (`- [ ]`) acceptance/
+ * test items, and how many checkbox items there are IN TOTAL (checked or
+ * not). Fenced code blocks and exempt sections (Out of scope / Blocked by /
+ * Reverse-if-wrong / Candidate / Further notes) count for neither. Each
+ * unchecked item is capped at 150 characters and multi-line
+ * (continuation-wrapped) bullets are tracked across lines.
+ *
+ * `total` exists because "nothing unchecked" means two different things: every
+ * criterion was met, or there were no criteria to meet. The guard used to
+ * treat both as a pass (infra#3125).
  *
  * @param {string} body
- * @returns {string[]}
+ * @returns {{unchecked: string[], total: number}}
  */
-function findUncheckedItems(body) {
+function parseChecklist(body) {
   const lines = (body || "").split("\n");
 
   // Track state across lines
@@ -32,6 +37,7 @@ function findUncheckedItems(body) {
   let currentBulletText = ""; // accumulated text for multi-line unchecked bullets
 
   const uncheckedItems = [];
+  let total = 0;
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -92,6 +98,7 @@ function findUncheckedItems(body) {
     const listItemMatch = /^[-*]\s+\[([ xX])\]\s+(.*)/.exec(line);
 
     if (listItemMatch) {
+      total += 1;
       // Flush any still-open unchecked bullet BEFORE starting to track this
       // one (#58): consecutive `- [ ]` lines with no blank line between them
       // are the overwhelmingly common Acceptance Criteria shape, and the
@@ -141,7 +148,76 @@ function findUncheckedItems(body) {
     uncheckedItems.push(currentBulletText.trim());
   }
 
-  return uncheckedItems;
+  return { unchecked: uncheckedItems, total };
 }
 
-module.exports = { findUncheckedItems };
+/**
+ * The unchecked items only. Kept as the stable seam the fixture suite pins.
+ *
+ * @param {string} body
+ * @returns {string[]}
+ */
+function findUncheckedItems(body) {
+  return parseChecklist(body).unchecked;
+}
+
+/**
+ * Three states, not two:
+ *   "open-items"  some criteria, at least one unchecked -> not done
+ *   "all-checked" some criteria, all checked            -> done
+ *   "no-criteria" no checkbox criteria at all           -> unknowable
+ * The third is not a pass: a guard that examined nothing cannot say the work
+ * was verified (infra#3125).
+ *
+ * @param {string} body
+ * @returns {{state: "open-items"|"all-checked"|"no-criteria", unchecked: string[], total: number}}
+ */
+function classify(body) {
+  const { unchecked, total } = parseChecklist(body);
+  if (unchecked.length > 0) return { state: "open-items", unchecked, total };
+  if (total === 0) return { state: "no-criteria", unchecked, total };
+  return { state: "all-checked", unchecked, total };
+}
+
+const NO_CRITERIA_MARKER = "<!-- close-completeness:no-criteria -->";
+
+/**
+ * The note posted when an issue is closed as completed with no checkbox
+ * criteria. It does NOT reopen: an issue without checkboxes is legitimate to
+ * have, and reopening every prose issue would punish trivial ones. The point
+ * is that the close no longer looks verified when nothing was examined.
+ *
+ * @returns {string}
+ */
+function noCriteriaNote() {
+  return (
+    `${NO_CRITERIA_MARKER}\n` +
+    "\ud83d\udd0e **Closed as completed with no acceptance criteria to verify.** " +
+    "The close-completeness guard checks `- [ ]` items outside the exempt sections; " +
+    "this issue has none, so the guard examined nothing and the close stands by " +
+    "default, not because the work was checked.\n\n" +
+    "If \"done\" rests on criteria written as prose, restate them as checkboxes. " +
+    "Otherwise add one line saying how you confirmed it. Close as *not planned* or " +
+    "add a `force-close` label to skip this note."
+  );
+}
+
+/**
+ * True when the note was already posted, so reopening and re-closing an issue
+ * does not stack copies.
+ *
+ * @param {Array<{body?: string}>} comments
+ * @returns {boolean}
+ */
+function hasNoCriteriaNote(comments) {
+  return (comments || []).some((c) => ((c && c.body) || "").includes(NO_CRITERIA_MARKER));
+}
+
+module.exports = {
+  findUncheckedItems,
+  parseChecklist,
+  classify,
+  noCriteriaNote,
+  hasNoCriteriaNote,
+  NO_CRITERIA_MARKER,
+};
