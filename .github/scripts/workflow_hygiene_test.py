@@ -29,6 +29,7 @@ from workflow_hygiene import (
     lint_file,
     lint_job_timeouts,
     lint_shell_script,
+    lint_template_injection,
 )
 
 DUMMY = Path("workflows/dummy.yml")
@@ -457,6 +458,76 @@ class Rule5Parity(unittest.TestCase):
             file=sys.stderr,
         )
         self.assertEqual(drift, [], "\n".join(drift))
+
+
+class TemplateInjection(unittest.TestCase):
+    """Rule 9, ported from the canonical linter 2026-09-22."""
+
+    def _lint(self, text: str) -> list[str]:
+        return lint_template_injection(DUMMY, text)
+
+    def test_event_value_in_run_block_fails(self):
+        text = (
+            "steps:\n"
+            "  - run: |\n"
+            '      echo "${{ github.event.pull_request.head.ref }}"\n'
+        )
+        errors = self._lint(text)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("github.event.pull_request.head.ref", errors[0])
+        self.assertIn(":3:", errors[0])
+
+    def test_step_output_in_single_line_run_fails(self):
+        text = "steps:\n  - run: echo ${{ steps.tag.outputs.version }}\n"
+        self.assertEqual(len(self._lint(text)), 1)
+
+    def test_value_passed_through_env_passes(self):
+        # The prescribed fix: the expression lives in env:, the script reads $VAR.
+        text = (
+            "steps:\n"
+            "  - env:\n"
+            "      REF: ${{ github.event.pull_request.head.ref }}\n"
+            "    run: |\n"
+            '      echo "$REF"\n'
+        )
+        self.assertEqual(self._lint(text), [])
+
+    def test_following_steps_env_is_not_read_as_script(self):
+        text = (
+            "steps:\n"
+            "  - run: |\n"
+            "      echo hi\n"
+            "  - env:\n"
+            "      TITLE: ${{ github.event.pull_request.title }}\n"
+            "    run: echo \"$TITLE\"\n"
+        )
+        self.assertEqual(self._lint(text), [])
+
+    def test_benign_families_are_not_flagged(self):
+        text = (
+            "steps:\n"
+            "  - run: |\n"
+            "      echo ${{ matrix.svc }} ${{ github.sha }} ${{ inputs.name }}\n"
+        )
+        self.assertEqual(self._lint(text), [])
+
+    def test_allow_marker_suppresses(self):
+        text = (
+            "steps:\n"
+            "  - run: |\n"
+            '      echo "${{ github.event.number }}"  # hygiene: allow-interpolation numeric id\n'
+        )
+        self.assertEqual(self._lint(text), [])
+
+    def test_lint_file_wires_rule_9_for_workflows(self):
+        text = "steps:\n  - run: echo ${{ github.event.issue.title }}\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(text)
+            path = Path(f.name)
+        try:
+            self.assertTrue(any("github.event.issue.title" in e for e in lint_file(path)))
+        finally:
+            path.unlink()
 
 
 if __name__ == "__main__":

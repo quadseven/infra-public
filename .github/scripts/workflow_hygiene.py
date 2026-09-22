@@ -9,7 +9,7 @@ manual audit, not by any gate.
 
 The canonical rule set lives in `infra/.github/scripts/workflow_hygiene.py`
 (the private fleet repo; renamed from `infrastructure` 2026-07-08) and has
-THIRTEEN rules as of 2026-09-22. Four are genuinely repo-agnostic and ported
+THIRTEEN rules as of 2026-09-22. Five are genuinely repo-agnostic and ported
 here verbatim (same regexes, same exception-comment conventions, so a
 contributor who knows one knows both):
 
@@ -29,6 +29,14 @@ contributor who knows one knows both):
      time on a hang). A reusable-workflow CALLER job (top-level `uses:`
      instead of `runs-on:`) is exempt. Exception:
      `# hygiene: allow-no-timeout-minutes <reason>`.
+  9. GHA template injection in `run:` scripts: no
+     `${{ github.event.* }}` or `${{ steps.*.outputs.* }}` inside a
+     `run:` script - GitHub pastes it into the script TEXT, so a crafted
+     value can close a quote and execute. Pass it via `env:` and use
+     "$VAR". Scoped to those two attacker-influenceable families on
+     purpose. Exception: `# hygiene: allow-interpolation <reason>`.
+     Ported 2026-09-22 so public fleet repos that run this copy (they
+     cannot read the private canonical) are covered for it.
 
 LOCAL-ONLY, no canonical counterpart - this repo enforces one rule the
 canonical set does not have, so it is numbered off the canonical scheme:
@@ -64,8 +72,6 @@ visible rather than silent. This is the open question, NOT a decision:
   8. working-tree branch switch before a local action. A bare
      `git checkout <branch>` deletes `.github/` from the working tree, so
      every later `uses: ./...` dies. No live violation here today.
-  9. GHA template injection in `run:` blocks. An interpolated `${{ }}`
-     reaches the shell as script TEXT, so quoting cannot save it.
  10. PR-preview reachability for auto-applying stacks. Scoped upstream to
      `iac.pulumi.*.yml`; this repo has no Pulumi at all, so likely
      not-applicable rather than undecided - but say so explicitly.
@@ -338,6 +344,74 @@ def lint_job_timeouts(path: Path, text: str) -> list[str]:
     return errors
 
 
+# Rule 9 - GHA template injection inside `run:` blocks. Ported verbatim from
+# the canonical linter. GitHub expands
+# `${{ }}` into the script TEXT before the shell parses it, so a value
+# containing a quote can close it and run commands.
+#
+# SCOPED ON PURPOSE to the two attacker-influenceable families. Flagging every
+# `${{ }}` would also hit `secrets.*`, `inputs.*`, `matrix.*` and `github.sha`,
+# which are common and mostly benign - a rule that noisy gets suppressed rather
+# than obeyed, and then catches nothing.
+#   - steps.*.outputs.*  : upstream release tags, API bodies, scraped RSS
+#   - github.event.*     : PR titles, branch names, issue bodies
+# The fix is always the same: pass it via `env:` and use "$VAR" in the script.
+TEMPLATE_INJECTION_RE = re.compile(
+    r"\$\{\{\s*(steps\.[\w-]+\.outputs\.[\w-]+|github\.event\.[\w.]+)\s*\}\}"
+)
+# A `run:` block scalar opener: `run: |`, `run: |-`, `- run: >`, etc. A one-line
+# `run: echo hi` is still script text, so it is matched too.
+RUN_BLOCK_RE = re.compile(r"^\s*(?:-\s*)?run:\s*(\|-?|>-?)?\s*$")
+RUN_INLINE_RE = re.compile(r"^\s*(?:-\s*)?run:\s+(?!\|)(?!>)\S")
+TEMPLATE_INJECTION_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-interpolation\b")
+
+
+def _run_script_lines(lines: list[str]):
+    """Yield (lineno, line) for every line that is SHELL SCRIPT TEXT.
+
+    Block extent is tracked by indentation: a `run: |` opens the block and the
+    first non-blank line at or left of the `run:` key's own indent closes it.
+    That boundary keeps a FOLLOWING step's `env:` - which legitimately carries
+    these expressions, and is the fix - from being read as script.
+    """
+    in_run = False
+    run_indent = 0
+    for n, line in enumerate(lines, 1):
+        if RUN_BLOCK_RE.match(line):
+            in_run = True
+            run_indent = len(line) - len(line.lstrip())
+            continue
+        if RUN_INLINE_RE.match(line):
+            in_run = False
+            yield n, line  # single-line `run: echo ...` is script too
+            continue
+        if not in_run:
+            continue
+        if line.strip() and (len(line) - len(line.lstrip())) <= run_indent:
+            in_run = False
+            continue
+        yield n, line
+
+
+def lint_template_injection(path: Path, text: str) -> list[str]:
+    """Rule 9 - no attacker-influenceable `${{ }}` inside a `run:` script."""
+    return [
+        _injection_error(path, n, m.group(1))
+        for n, line in _run_script_lines(text.splitlines())
+        if not TEMPLATE_INJECTION_ALLOW_RE.search(line)
+        for m in TEMPLATE_INJECTION_RE.finditer(line)
+    ]
+
+
+def _injection_error(path: Path, n: int, expr: str) -> str:
+    return (
+        f"{path}:{n}: `${{{{ {expr} }}}}` interpolated inside a `run:` script - "
+        f"GitHub pastes it into the script TEXT, so a crafted value can close "
+        f"the quote and execute. Pass it via `env:` and reference "
+        f'"$VAR" instead'
+    )
+
+
 def lint_file(path: Path) -> list[str]:
     errors: list[str] = []
     text = path.read_text()
@@ -375,6 +449,7 @@ def lint_file(path: Path) -> list[str]:
 
     if path.suffix == ".yml":
         errors.extend(lint_curl_timeouts(path, text))
+        errors.extend(lint_template_injection(path, text))
         if path.parent == WF_DIR:
             errors.extend(lint_job_timeouts(path, text))
 
