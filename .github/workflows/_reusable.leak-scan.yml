@@ -1,10 +1,10 @@
-name: _reusable · Leak scan (PR diff + PR text)
+name: _reusable · Leak scan (PR diff + PR/issue text)
 
 # PURPOSE: a public repo must not publish private-infrastructure identifiers -
 #   hostnames, private-range IPs, device identifiers, local user paths,
 #   cross-repo refs naming a private repo, or a real person's name. This is the
-#   per-PR enforcement of templates/public-repo/AGENTS.md, which until now was a
-#   policy document with nothing behind it.
+#   per-PR (and per-issue) enforcement of templates/public-repo/AGENTS.md,
+#   which until now was a policy document with nothing behind it.
 #
 # WHY IT EXISTS. Every public repo in the fleet was checked for a per-PR leak
 #   check and none had one. Each leak fix had therefore been a one-time manual
@@ -13,12 +13,22 @@ name: _reusable · Leak scan (PR diff + PR text)
 #   it is secret-SHAPED, so GitHub's secret scanning has no opinion on any of
 #   it: what leaks is topology and identity, not credentials.
 #
-# WHAT IT SCANS. The PR diff AND the PR title/body. The second half is not
-#   incidental - most of what this exists to stop was written in prose, in an
-#   issue or a PR description, where no code scanner would ever look. The PR
-#   text reaches the scanner through a FILE fed by env, never interpolated into
-#   the run body: a PR title is attacker-controlled text and `${{ }}` inside a
-#   `run:` is a shell injection.
+# ISSUES, NOT JUST PRs (infra-public#74). The PR path alone left a gap this
+#   scanner's own docstring already anticipated (`--text-file` is documented
+#   as "an issue/PR body") but nothing wired up: infra-public#71 leaked a
+#   private repo's literal name in an ISSUE body, filed by automation, with no
+#   diff and no PR to gate. An `issues` event has no code and no merge to
+#   block, so a finding here cannot fail a check the way a PR's does - instead
+#   it is posted back as a comment on the issue itself (step 9), which is the
+#   closest equivalent to the `::error::` annotation a PR finding gets. The
+#   workflow run still goes red for anyone auditing Actions history.
+#
+# WHAT IT SCANS. The PR diff (PR events only) AND the PR/issue title+body. The
+#   text half is not incidental - most of what this exists to stop was written
+#   in prose, in an issue or a PR description, where no code scanner would ever
+#   look. The text reaches the scanner through a FILE fed by env, never
+#   interpolated into the run body: a title is attacker-controlled text and
+#   `${{ }}` inside a `run:` is a shell injection.
 #
 # WHERE THE SCRIPT COMES FROM. One copy, in this repo, fetched at `scanner-ref`
 #   (default `main`). Not vendored per repo: a scanner copied into 17 repos is 17
@@ -66,6 +76,21 @@ name: _reusable · Leak scan (PR diff + PR text)
 #       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
 #       permissions: { contents: read }   # the caller owns permissions - see below
 #       # with: { scanner-ref: <sha> }    # optional: pin the patterns too
+#
+# Example caller ALSO scanning issue bodies at filing time - opt-in, additive
+# to the example above (a PR-only caller is unaffected by this section):
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, edited]
+#     issues:
+#       types: [opened, edited]
+#   jobs:
+#     leak-scan:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
+#       # issues: write is ONLY used on an `issues` event, to comment a finding
+#       # back onto the issue (there is no check to fail on an issue). A
+#       # PR-triggered run of the same caller never touches it.
+#       permissions: { contents: read, issues: write }
 #
 # Example caller WITH the deny-list layer (needs OIDC + a role that can read
 # exactly that one parameter):
@@ -132,16 +157,18 @@ on:
 
 jobs:
   scan:
-    name: Scan diff and PR text for private identifiers
+    name: Scan diff and PR/issue text for private identifiers
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    # Keyed on the caller's workflow + PR: superseded pushes to the same PR are
-    # cancelled, but two different callers' guards never cancel each other.
+    # Keyed on the caller's workflow + PR-or-issue: superseded pushes/edits to
+    # the same PR or issue are cancelled, but two different callers' guards
+    # never cancel each other, and a PR never cancels an issue's run or vice
+    # versa (the two number sequences are independent, this is belt-and-braces).
     concurrency:
-      group: leak-scan-${{ github.workflow }}-${{ github.event.pull_request.number }}
+      group: leak-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     steps:
-      - name: "1. Refuse to run outside a pull_request event"
+      - name: "1. Refuse to run outside a pull_request or issues event"
         env:
           EVENT: ${{ github.event_name }}
         run: |
@@ -149,12 +176,20 @@ jobs:
           # pull_request_target is deliberately NOT accepted: it runs with the
           # base repo's token against attacker-authored head content, and this
           # workflow reads that content. A guard is not worth a token leak.
-          if [ "$EVENT" != "pull_request" ]; then
-            echo "::error::leak scan supports pull_request only (got '$EVENT'). pull_request_target is refused by design."
+          # issues (not issues_target - no such event exists) always runs the
+          # DEFAULT branch's workflow file regardless of who filed the issue,
+          # so it carries none of pull_request_target's risk.
+          if [ "$EVENT" != "pull_request" ] && [ "$EVENT" != "issues" ]; then
+            echo "::error::leak scan supports pull_request and issues only (got '$EVENT'). pull_request_target is refused by design."
             exit 1
           fi
 
       - name: "2. Checkout the calling repo (full history: the base commit must be diffable)"
+        # Issues carry no diff - nothing to check out or compare. Skipping
+        # this on an issues event, not just the diff step below, is what lets
+        # a caller grant this job read-only contents access for its PR path
+        # while still running the issues path with no checkout at all.
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           path: _repo
@@ -229,9 +264,10 @@ jobs:
           role-to-assume: ${{ secrets.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
-      - name: "8. Scan the PR diff and the PR title/body"
-        working-directory: _repo
+      - name: "8. Scan the diff (PR only) and the title/body (PR or issue)"
+        id: scan
         env:
+          EVENT: ${{ github.event_name }}
           SCANNER: ${{ github.workspace }}/_scanner/.github/scripts/check_private_leaks.py
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -239,11 +275,13 @@ jobs:
           OWN_REPO: ${{ github.repository }}
           EXTRA_REFS: ${{ inputs.allowed-repo-refs }}
           DENY_PARAM: ${{ inputs.deny-list-ssm-param }}
-          ENFORCE: ${{ inputs.enforce }}
-          # Attacker-controlled text. It is written to a file below and never
-          # interpolated into a command.
+          # Attacker-controlled text, for whichever event fired - exactly one
+          # of the two pairs below is populated by GitHub. Written to a file
+          # below and never interpolated into a command.
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           set -euo pipefail
 
@@ -260,41 +298,72 @@ jobs:
             args+=(--deny-list-ssm "$DENY_PARAM")
           fi
 
-          # Three-dot: the merge base to head, which is what GitHub itself calls
-          # the PR's changes. Two-dot would also surface commits the base branch
-          # gained after the PR forked.
-          diff_args=(--diff "${BASE_SHA}...${HEAD_SHA}")
-          # If GitHub says this PR changed files, a scan that sees an empty diff
-          # did not find nothing - it looked at nothing, and must not report
-          # clean. (Shallow clone / unfetched base is the usual cause.)
-          if [ "${CHANGED_FILES:-0}" -gt 0 ] 2>/dev/null; then
-            diff_args+=(--require-changes)
+          rc_diff=0
+          if [ "$EVENT" = "pull_request" ]; then
+            # Three-dot: the merge base to head, which is what GitHub itself
+            # calls the PR's changes. Two-dot would also surface commits the
+            # base branch gained after the PR forked.
+            diff_args=(--diff "${BASE_SHA}...${HEAD_SHA}")
+            # If GitHub says this PR changed files, a scan that sees an empty
+            # diff did not find nothing - it looked at nothing, and must not
+            # report clean. (Shallow clone / unfetched base is the usual cause.)
+            if [ "${CHANGED_FILES:-0}" -gt 0 ] 2>/dev/null; then
+              diff_args+=(--require-changes)
+            fi
+            echo "--- PR diff ---"
+            ( cd _repo && python3 "$SCANNER" "${diff_args[@]}" "${args[@]}" ) || rc_diff=$?
           fi
 
-          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr-text.md"
+          printf '%s\n%s\n' "${PR_TITLE}${ISSUE_TITLE}" "${PR_BODY}${ISSUE_BODY}" > "$RUNNER_TEMP/text.md"
 
-          rc_diff=0
-          echo "--- PR diff ---"
-          python3 "$SCANNER" "${diff_args[@]}" "${args[@]}" || rc_diff=$?
           rc_text=0
-          echo "--- PR title and body ---"
-          python3 "$SCANNER" --text-file "$RUNNER_TEMP/pr-text.md" "${args[@]}" || rc_text=$?
+          echo "--- title and body ---"
+          python3 "$SCANNER" --text-file "$RUNNER_TEMP/text.md" "${args[@]}" || rc_text=$?
 
           # Exit-code contract (see the scanner's docstring):
           #   0 clean | 1 findings | 2+ could not scan.
           # Only 1 is softenable, and only when the caller asked for warn mode.
           worst=$(( rc_diff > rc_text ? rc_diff : rc_text ))
-          case "$worst" in
+          echo "worst=$worst" >> "$GITHUB_OUTPUT"
+          echo "textfile=$RUNNER_TEMP/text.md" >> "$GITHUB_OUTPUT"
+
+      - name: "9. Comment the finding back onto the issue (issues event only)"
+        # There is no check to fail on a bare issue, so the finding is posted
+        # where the filer (human or automation) will actually see it - the
+        # nearest equivalent to the ::error:: annotation a PR finding gets.
+        # Runs only on a real finding (worst == 1), never on a scan failure
+        # (worst >= 2): a scanner that could not run has nothing true to say
+        # about the issue's content.
+        if: github.event_name == 'issues' && steps.scan.outputs.worst == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # single-quoted on purpose: the backticks are literal markdown, nothing here should expand
+          msg=':warning: **Leak scan found a possible private-infrastructure identifier in the title or body of this issue.**
+
+          This repo is public - see `templates/public-repo/AGENTS.md`. Please edit the issue to describe the finding generically (by role, not by hostname/repo-name/person), or mark a deliberate, reviewed exception with `leak-guard-allow` on that line. Re-editing the issue re-runs this check.'
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$msg"
+
+      - name: "10. Enforce the result"
+        env:
+          WORST: ${{ steps.scan.outputs.worst }}
+          ENFORCE: ${{ inputs.enforce }}
+        run: |
+          set -euo pipefail
+          case "$WORST" in
             0) echo "leak scan: clean" ;;
             1)
               if [ "$ENFORCE" = "true" ]; then
-                echo "::error::leak scan found private identifiers in this PR (see the output above). Rewrite them generically, or mark a deliberate one with 'leak-guard-allow' on that line."
+                echo "::error::leak scan found private identifiers (see the output above). Rewrite them generically, or mark a deliberate one with 'leak-guard-allow' on that line."
                 exit 1
               fi
-              echo "::warning::leak scan found private identifiers in this PR. This caller runs in warn mode (enforce: false), so the check is green - fix them before enforce is turned on."
+              echo "::warning::leak scan found private identifiers. This caller runs in warn mode (enforce: false), so the check is green - fix them before enforce is turned on."
               ;;
             *)
-              echo "::error::the leak scanner could not complete (exit $worst). Failing closed: a guard that goes green when it cannot scan certifies the leak it was meant to catch."
+              echo "::error::the leak scanner could not complete (exit $WORST). Failing closed: a guard that goes green when it cannot scan certifies the leak it was meant to catch."
               exit 1
               ;;
           esac
