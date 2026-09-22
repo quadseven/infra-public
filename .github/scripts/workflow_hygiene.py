@@ -345,7 +345,7 @@ def lint_job_timeouts(path: Path, text: str) -> list[str]:
 
 
 # Rule 9 - GHA template injection inside `run:` blocks. Ported verbatim from
-# the canonical linter (infra#1852, swept in infra#2531). GitHub expands
+# the canonical linter. GitHub expands
 # `${{ }}` into the script TEXT before the shell parses it, so a value
 # containing a quote can close it and run commands.
 #
