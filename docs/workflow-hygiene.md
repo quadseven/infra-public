@@ -13,7 +13,7 @@ The canonical, full rule set lives in the private fleet repo:
 `infra/.github/scripts/workflow_hygiene.py` (renamed from `infrastructure`
 on 2026-07-08). It has **twelve** rules as of 2026-09-15.
 
-`infra-public`'s copy ports four of them verbatim (same regexes, same
+`infra-public`'s copy ports five of them verbatim (same regexes, same
 `# hygiene: allow-*` exception-comment convention):
 
 1. SHA-pinning - every third-party `uses:` must be a full 40-hex commit SHA.
@@ -23,6 +23,10 @@ on 2026-07-08). It has **twelve** rules as of 2026-09-15.
    `.github/scripts/fixtures/rule5_parity/`.
 6. `set -e` in standalone shell scripts under `.github/`.
 7. per-job `timeout-minutes:` on any job with `runs-on:`.
+9. GHA template injection - no `${{ github.event.* }}` or
+   `${{ steps.*.outputs.* }}` inside a `run:` script; pass it via `env:`.
+   Exception: `# hygiene: allow-interpolation <reason>`. Ported 2026-09-22 so
+   public fleet repos that run this copy are covered for it.
 
 ### Local-only, with no canonical counterpart
 
@@ -49,7 +53,7 @@ Deliberately **not** ported - each would be dead or wrong code here:
 
 ### Not yet dispositioned
 
-**Rules 3, 8, 9, 10, 11 and 12 are in neither list above** - nobody has
+**Rules 3, 8, 10, 11 and 12 are in neither list above** - nobody has
 decided whether they apply here. Not obviously inapplicable, so this is a
 gap, not a rejection (infra-public#71):
 
@@ -57,14 +61,12 @@ gap, not a rejection (infra-public#71):
   declare `environment:`. A live instance already happened here (#51).
 - **8.** Working-tree branch switch before a local action - a `run:` step that
   switches branches breaks any later `uses: ./.github/actions/...`.
-- **9.** GHA template injection - no `${{ }}` interpolation of
-  attacker-controlled values directly inside a `run:` block.
 - **10.** PR-preview reachability for auto-applying stacks - scoped upstream
   to `iac.pulumi.*.yml`. This repo has no Pulumi anywhere
   (`grep -rl pulumi .github/workflows/` is empty), so this is probably
   *not applicable* rather than undecided - but it should say so explicitly.
 - **11.** One version label per pinned action - reinforces Rule 1, which *is*
-  ported. The strongest port candidate of the six.
+  ported. The strongest port candidate of the five.
 - **12.** No `gh` CLI in an `arc-*` pool job - same reasoning as Rule 4's
   rejection; this repo has no ARC pool.
 
