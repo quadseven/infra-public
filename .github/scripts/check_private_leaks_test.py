@@ -51,6 +51,11 @@ def hits(text: str, *, diff_mode: bool = False, rules=None) -> list[str]:
     return scan(text, rules or RULES, label="t", diff_mode=diff_mode)
 
 
+# fmt: off
+# Below here, fixture lines carry a trailing `leak-guard-allow` marker, which
+# the scanner only honors on the SAME line as the hit. `ruff format` wraps
+# long calls and moves a trailing comment to the closing bracket, orphaning
+# the fixture from its marker, so the formatter stays out of the tests.
 class GenericShapes(unittest.TestCase):
     """One positive per shape. A leak class with no fixture is a leak class
     that can be deleted by accident."""
@@ -288,3 +293,4 @@ class CliAgainstRealGit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+# fmt: on

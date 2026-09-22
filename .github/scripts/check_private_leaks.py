@@ -70,6 +70,7 @@ deliberate differences, all needed to make one script serve every repo:
      local user path (`/Users/<name>`) and a MAC address. Both measured zero
      hits across this repo's full history before being added.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -152,10 +153,10 @@ def repo_ref_pattern(allowed: list[str]) -> str:
     if allowed:
         exempt = "(?!(?:%s)\\b)" % "|".join(re.escape(a) for a in sorted(allowed))
     return (
-        r"(?<![\w/-])"                       # not mid-word, not the tail of a path
-        r"(?:[a-z0-9][a-z0-9._-]*/)?"        # optional owner/ prefix
-        + exempt +
-        r"[a-z][a-z0-9_]*(?:-[a-z0-9]+)*[a-z0-9]#\d+\b"
+        r"(?<![\w/-])"  # not mid-word, not the tail of a path
+        r"(?:[a-z0-9][a-z0-9._-]*/)?"  # optional owner/ prefix
+        + exempt
+        + r"[a-z][a-z0-9_]*(?:-[a-z0-9]+)*[a-z0-9]#\d+\b"
     )
 
 
@@ -168,14 +169,18 @@ ALLOW_MARKERS = (
 )
 
 
-def build_patterns(allow_repo_refs: list[str] | None = None) -> list[tuple[str, re.Pattern[str], str]]:
+def build_patterns(
+    allow_repo_refs: list[str] | None = None,
+) -> list[tuple[str, re.Pattern[str], str]]:
     """Compile the generic-shape rules for one run."""
     rules = [(name, re.compile(pattern, re.I), why) for name, pattern, why in PATTERNS]
-    rules.append((
-        "private-issue-ref",
-        re.compile(repo_ref_pattern(allow_repo_refs or []), re.I),
-        REPO_REF_WHY,
-    ))
+    rules.append(
+        (
+            "private-issue-ref",
+            re.compile(repo_ref_pattern(allow_repo_refs or []), re.I),
+            REPO_REF_WHY,
+        )
+    )
     return rules
 
 
@@ -188,25 +193,44 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
     deliberately added to it, which is indistinguishable from a green run.
     """
     out = subprocess.run(
-        ["aws", "ssm", "get-parameter", "--name", param, "--with-decryption",
-         "--query", "Parameter.Value", "--output", "text"],
-        capture_output=True, text=True, check=False,
+        [
+            "aws",
+            "ssm",
+            "get-parameter",
+            "--name",
+            param,
+            "--with-decryption",
+            "--query",
+            "Parameter.Value",
+            "--output",
+            "text",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if out.returncode != 0:
-        print(f"FATAL: could not read deny-list from SSM {param}: "
-              f"{out.stderr.strip()[:200]}", file=sys.stderr)
+        print(
+            f"FATAL: could not read deny-list from SSM {param}: "
+            f"{out.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     terms = [t.strip() for t in out.stdout.split() if t.strip()]
     if not terms:
         # An empty parameter is not "no terms to check", it is a deny-list layer
         # that was asked for and did not arrive - a typo'd path, a wiped value,
         # a wrong region. Refuse rather than run half a guard.
-        print(f"FATAL: deny-list SSM parameter {param} resolved to an empty "
-              "value; refusing to run with the deny-list layer inert",
-              file=sys.stderr)
+        print(
+            f"FATAL: deny-list SSM parameter {param} resolved to an empty "
+            "value; refusing to run with the deny-list layer inert",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
-    return [("deny-list", re.compile(re.escape(t), re.I), "an explicitly denied term")
-            for t in terms]
+    return [
+        ("deny-list", re.compile(re.escape(t), re.I), "an explicitly denied term")
+        for t in terms
+    ]
 
 
 def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
@@ -222,9 +246,9 @@ def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
     for lineno, line in enumerate(text.splitlines(), 1):
         if diff_mode:
             if line.startswith(("---", "+++")):
-                continue          # file headers carry paths, not content
+                continue  # file headers carry paths, not content
             if line.startswith("-"):
-                continue          # a removal is a scrub; never block it
+                continue  # a removal is a scrub; never block it
             payload = line[1:] if line.startswith("+") else line
         else:
             payload = line
@@ -247,12 +271,19 @@ def git_diff(args: list[str]) -> str:
     green. errors="replace" so a file with non-UTF-8 bytes produces a scannable
     diff instead of a decode traceback.
     """
-    out = subprocess.run(["git", "diff", "-U0", *args], capture_output=True,
-                         text=True, errors="replace", check=False)
+    out = subprocess.run(
+        ["git", "diff", "-U0", *args],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
     if out.returncode != 0:
-        print(f"FATAL: `git diff -U0 {' '.join(args)}` failed "
-              f"(exit {out.returncode}): {out.stderr.strip()[:300]}",
-              file=sys.stderr)
+        print(
+            f"FATAL: `git diff -U0 {' '.join(args)}` failed "
+            f"(exit {out.returncode}): {out.stderr.strip()[:300]}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     return out.stdout
 
@@ -264,12 +295,20 @@ def main() -> int:
     src.add_argument("--diff", help="scan `git diff <RANGE>` (use BASE...HEAD)")
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
     ap.add_argument("--deny-list-ssm", help="SSM param holding extra terms")
-    ap.add_argument("--allow-repo-ref", action="append", default=[], metavar="NAME",
-                    help="repo name whose `<name>#123` refs are fine (repeatable); "
-                         "callers pass at least their own repo's name")
-    ap.add_argument("--require-changes", action="store_true",
-                    help="with --diff/--staged: exit 2 if the diff is empty, so a "
-                         "scan that saw nothing cannot report clean")
+    ap.add_argument(
+        "--allow-repo-ref",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="repo name whose `<name>#123` refs are fine (repeatable); "
+        "callers pass at least their own repo's name",
+    )
+    ap.add_argument(
+        "--require-changes",
+        action="store_true",
+        help="with --diff/--staged: exit 2 if the diff is empty, so a "
+        "scan that saw nothing cannot report clean",
+    )
     args = ap.parse_args()
 
     rules = build_patterns(args.allow_repo_ref)
@@ -292,15 +331,19 @@ def main() -> int:
         label = args.text_file
 
     if args.require_changes and not text.strip():
-        print("FATAL: --require-changes was set but the diff is empty - the "
-              "scan saw nothing, so it cannot report clean. Check the base/head "
-              "refs are fetched (a shallow clone is the usual cause).",
-              file=sys.stderr)
+        print(
+            "FATAL: --require-changes was set but the diff is empty - the "
+            "scan saw nothing, so it cannot report clean. Check the base/head "
+            "refs are fetched (a shallow clone is the usual cause).",
+            file=sys.stderr,
+        )
         return 2
 
     hits = scan(text, rules, label=label, diff_mode=args.staged or bool(args.diff))
     if not hits:
-        print(f"leak guard: clean ({len(rules)} patterns, {len(text.splitlines())} lines scanned)")
+        print(
+            f"leak guard: clean ({len(rules)} patterns, {len(text.splitlines())} lines scanned)"
+        )
         return 0
 
     print("BLOCKED: private infrastructure identifiers found\n", file=sys.stderr)
