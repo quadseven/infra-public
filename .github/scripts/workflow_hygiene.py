@@ -9,7 +9,7 @@ manual audit, not by any gate.
 
 The canonical rule set lives in `infra/.github/scripts/workflow_hygiene.py`
 (the private fleet repo; renamed from `infrastructure` 2026-07-08) and has
-TWELVE rules as of 2026-09-15. Four are genuinely repo-agnostic and ported
+THIRTEEN rules as of 2026-09-22. Four are genuinely repo-agnostic and ported
 here verbatim (same regexes, same exception-comment conventions, so a
 contributor who knows one knows both):
 
@@ -70,14 +70,20 @@ visible rather than silent. This is the open question, NOT a decision:
      `iac.pulumi.*.yml`; this repo has no Pulumi at all, so likely
      not-applicable rather than undecided - but say so explicitly.
  11. one version label per pinned action. Reinforces Rule 1, which IS
-     ported, so this is the strongest port candidate of the six.
+     ported, so this is the strongest port candidate of the seven.
  12. no `gh` CLI in an arc-pool job. Same reasoning as Rule 4's rejection -
      this repo has no ARC pool.
+ 13. no image push from a runner on the shared private-infra pool. Same
+     shape as Rules 4 and 12 - it encodes which runner pool may reach a
+     particular registry, a fact this repo has no equivalent of - so the
+     likely answer is not-applicable. Recorded as undecided rather than
+     rejected because nobody has actually made that call yet.
 
-Deciding these six - and recording HOW this ledger stays current - is the
+Deciding these seven - and recording HOW this ledger stays current - is the
 remaining work in #71. Note the count above is a hand-copied fact with no
-local anchor: it has now been wrong three times (seven, then a correction to
-nine, then one to ten, each overtaken before merging). The durable guard
+local anchor: it has now been wrong four times (seven, then a correction to
+nine, then one to ten, then twelve - which went stale the same way when
+Rule 13 landed upstream, found by the 2026-09-22 sweep). The durable guard
 cannot live here, because visibility only runs one way: `infra` is private,
 so this repo's CI can never read it, while `infra` can read this public one.
 The assertion belongs upstream, next to `rule_census()` /
