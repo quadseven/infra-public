@@ -109,7 +109,9 @@ PARITY_DIR = GITHUB_DIR / "scripts" / "fixtures" / "rule5_parity"
 # owner tolerates a quoted YAML scalar (`uses: "actions/checkout@v4"`) -
 # the ref capture group's own charset already excludes the closing quote,
 # so no corresponding change is needed on the right side.
-USES_RE = re.compile(r"^\s*-?\s*uses:\s*['\"]?([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)")
+USES_RE = re.compile(
+    r"^\s*-?\s*uses:\s*['\"]?([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)"
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # Rule 1b - EOL Node major detection. A SHA-pinned action that carries a
@@ -217,7 +219,9 @@ def _description_block_lines(lines: list[str]) -> set[int]:
             continue
         indent = len(m.group(1))
         i += 1
-        while i < n and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+        while i < n and (
+            not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent
+        ):
             inside.add(i)
             i += 1
     return inside
@@ -251,7 +255,11 @@ def lint_curl_timeouts(path: Path, text: str) -> list[str]:
     i = 0
     while i < n:
         code = code_part(lines[i])
-        if i in desc_lines or PROSE_FIELD_RE.match(lines[i]) or not CURL_RE.search(code):
+        if (
+            i in desc_lines
+            or PROSE_FIELD_RE.match(lines[i])
+            or not CURL_RE.search(code)
+        ):
             i += 1
             continue
         start = i
@@ -261,8 +269,12 @@ def lint_curl_timeouts(path: Path, text: str) -> list[str]:
             i += 1
             joined += " " + code_part(lines[i])
             span.append(lines[i])
-        opted_out = any(CURL_ALLOW_RE.search(ln) for ln in span + _comment_run_above(lines, start))
-        if not opted_out and not (CURL_MAXTIME_RE.search(joined) and CURL_CONNTIMEOUT_RE.search(joined)):
+        opted_out = any(
+            CURL_ALLOW_RE.search(ln) for ln in span + _comment_run_above(lines, start)
+        )
+        if not opted_out and not (
+            CURL_MAXTIME_RE.search(joined) and CURL_CONNTIMEOUT_RE.search(joined)
+        ):
             errors.append(
                 f"{path}:{start + 1}: curl missing --max-time/-m and/or --connect-timeout "
                 f"(a stalled request hangs the step up to the job timeout) - add both, "
@@ -280,8 +292,10 @@ def lint_shell_script(path: Path, text: str) -> list[str]:
         return []
     if SET_E_RE.search(text) or SHEBANG_E_RE.search(text):
         return []
-    return [f"{path}: standalone shell script has no `set -e` (a failed command can "
-            f"go unnoticed) - add it, or mark `# hygiene: allow-no-set-e <reason>`"]
+    return [
+        f"{path}: standalone shell script has no `set -e` (a failed command can "
+        f"go unnoticed) - add it, or mark `# hygiene: allow-no-set-e <reason>`"
+    ]
 
 
 def lint_job_timeouts(path: Path, text: str) -> list[str]:
@@ -374,7 +388,9 @@ def main() -> int:
     if GITHUB_DIR.is_dir():
         # The Rule 5 parity corpus holds deliberately bad `.sh` cases: test
         # data, not scripts this repo runs.
-        targets.extend(p for p in sorted(GITHUB_DIR.rglob("*.sh")) if PARITY_DIR not in p.parents)
+        targets.extend(
+            p for p in sorted(GITHUB_DIR.rglob("*.sh")) if PARITY_DIR not in p.parents
+        )
 
     all_errors: list[str] = []
     for path in targets:
@@ -386,7 +402,9 @@ def main() -> int:
 
     for err in all_errors:
         print(f"::error::{err}")
-    print(f"workflow_hygiene: {len(all_errors)} violation(s) in {len(targets)} files checked")
+    print(
+        f"workflow_hygiene: {len(all_errors)} violation(s) in {len(targets)} files checked"
+    )
     return 1
 
 

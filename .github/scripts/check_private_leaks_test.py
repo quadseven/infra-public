@@ -56,13 +56,21 @@ class GenericShapes(unittest.TestCase):
     that can be deleted by accident."""
 
     def test_tailnet_host(self):
-        self.assertIn("tailnet-host", hits("box.ts.example.net")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "tailnet-host", hits("box.ts.example.net")[0]
+        )  # leak-guard-allow: fixture
 
     def test_tailscale_cgnat_ip(self):
-        self.assertIn("tailscale-ip", hits("100.101.102.103")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "tailscale-ip", hits("100.101.102.103")[0]
+        )  # leak-guard-allow: fixture
 
     def test_rfc1918_ip(self):
-        for ip in ("10.1.2.3", "192.168.4.5", "172.20.0.9"):  # leak-guard-allow: fixture
+        for ip in (
+            "10.1.2.3",
+            "192.168.4.5",
+            "172.20.0.9",
+        ):  # leak-guard-allow: fixture
             with self.subTest(ip=ip):
                 self.assertIn("rfc1918-ip", hits(ip)[0])
 
@@ -72,13 +80,19 @@ class GenericShapes(unittest.TestCase):
         self.assertEqual(hits("203.0.113.7"), [])
 
     def test_server_hostname(self):
-        self.assertIn("server-hostname", hits("srv-thing-01")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "server-hostname", hits("srv-thing-01")[0]
+        )  # leak-guard-allow: fixture
 
     def test_cluster_node(self):
-        self.assertIn("cluster-node", hits("k8s-abc-pool-worker-2")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "cluster-node", hits("k8s-abc-pool-worker-2")[0]
+        )  # leak-guard-allow: fixture
 
     def test_mac_address(self):
-        self.assertIn("mac-address", hits("a1:b2:c3:d4:e5:f6")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "mac-address", hits("a1:b2:c3:d4:e5:f6")[0]
+        )  # leak-guard-allow: fixture
 
     def test_version_string_is_not_a_mac(self):
         self.assertEqual(hits("timings 01:02:03 and 1.2.3"), [])
@@ -89,19 +103,30 @@ class LocalUserPaths(unittest.TestCase):
     and container accounts must stay clean or every Actions log line is a hit."""
 
     def test_macos_home_is_caught(self):
-        self.assertIn("local-user-path", hits("/Users/somebody/dev/x")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "local-user-path", hits("/Users/somebody/dev/x")[0]
+        )  # leak-guard-allow: fixture
 
     def test_linux_home_is_caught(self):
-        self.assertIn("local-user-path", hits("/home/somebody/dev/x")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "local-user-path", hits("/home/somebody/dev/x")[0]
+        )  # leak-guard-allow: fixture
 
     def test_windows_home_is_caught(self):
-        self.assertIn("local-user-path", hits(r"C:\Users\somebody\dev")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "local-user-path", hits(r"C:\Users\somebody\dev")[0]
+        )  # leak-guard-allow: fixture
 
     def test_ci_runner_home_is_clean(self):
         self.assertEqual(hits("/home/runner/work/repo/repo"), [])
 
     def test_container_and_placeholder_accounts_are_clean(self):
-        for p in ("/home/root/x", "/home/node/app", "/Users/you/dev", "/home/appuser/x"):
+        for p in (
+            "/home/root/x",
+            "/home/node/app",
+            "/Users/you/dev",
+            "/home/appuser/x",
+        ):
             with self.subTest(path=p):
                 self.assertEqual(hits(p), [])
 
@@ -118,14 +143,18 @@ class CrossRepoRefs(unittest.TestCase):
         self.assertEqual(hits("fixed in quadseven/infra-public#46"), [])
 
     def test_other_repo_bare_ref_is_caught(self):
-        self.assertIn("private-issue-ref", hits("see someplace#12")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "private-issue-ref", hits("see someplace#12")[0]
+        )  # leak-guard-allow: fixture
 
     def test_other_repo_qualified_ref_is_caught(self):
         # grug's original missed this form entirely: the lookbehind that stops
         # the repo half of a qualified ref matching on its own also
         # let the whole qualified ref sail through - the form that names
         # the owner too.
-        self.assertIn("private-issue-ref", hits("see someone/someplace#12")[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "private-issue-ref", hits("see someone/someplace#12")[0]
+        )  # leak-guard-allow: fixture
 
     def test_bare_issue_number_is_clean(self):
         self.assertEqual(hits("closes #123"), [])
@@ -154,10 +183,14 @@ class DiffSemantics(unittest.TestCase):
     def test_removed_line_is_never_blocked(self):
         # A `-` line is someone SCRUBBING a leak. Blocking it would make the
         # guard forbid its own remedy.
-        self.assertEqual(hits("-old 10.1.2.3 here", diff_mode=True), [])  # leak-guard-allow: fixture
+        self.assertEqual(
+            hits("-old 10.1.2.3 here", diff_mode=True), []
+        )  # leak-guard-allow: fixture
 
     def test_added_line_is_blocked(self):
-        self.assertIn("rfc1918-ip", hits("+new 10.1.2.3 here", diff_mode=True)[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "rfc1918-ip", hits("+new 10.1.2.3 here", diff_mode=True)[0]
+        )  # leak-guard-allow: fixture
 
     def test_diff_file_headers_are_skipped(self):
         text = "--- a/10.1.2.3.txt\n+++ b/10.1.2.3.txt\n"  # leak-guard-allow: fixture
@@ -166,7 +199,9 @@ class DiffSemantics(unittest.TestCase):
     def test_markdown_bullet_is_scanned_in_text_mode(self):
         # The same leading `-` that means "removal" in a diff means "bullet" in
         # a PR body, and most of the leaks this guard exists for were prose.
-        self.assertIn("rfc1918-ip", hits("- the host at 10.1.2.3", diff_mode=False)[0])  # leak-guard-allow: fixture
+        self.assertIn(
+            "rfc1918-ip", hits("- the host at 10.1.2.3", diff_mode=False)[0]
+        )  # leak-guard-allow: fixture
 
     def test_allow_marker_exempts_a_line(self):
         self.assertEqual(hits("10.1.2.3  # leak-guard-allow: documented example"), [])
@@ -180,7 +215,8 @@ class SsmDenyList(unittest.TestCase):
 
     def _run(self, returncode: int, stdout: str, stderr: str = ""):
         completed = subprocess.CompletedProcess(
-            args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
         with mock.patch("check_private_leaks.subprocess.run", return_value=completed):
             return load_ssm_deny_list("/some/param")
 
@@ -216,7 +252,9 @@ class CliAgainstRealGit(unittest.TestCase):
         cls._git("commit", "-q", "-m", "base")
         cls.base = cls._git("rev-parse", "HEAD").strip()
         # A seeded leak, exactly as a careless PR would introduce it.
-        (cls.repo / "notes.md").write_text("the box at 10.9.8.7 needs a restart\n")  # leak-guard-allow: fixture
+        (cls.repo / "notes.md").write_text(
+            "the box at 10.9.8.7 needs a restart\n"
+        )  # leak-guard-allow: fixture
         cls._git("add", "-A")
         cls._git("commit", "-q", "-m", "seeded")
         cls.head = cls._git("rev-parse", "HEAD").strip()
@@ -227,14 +265,28 @@ class CliAgainstRealGit(unittest.TestCase):
 
     @classmethod
     def _git(cls, *args: str) -> str:
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
-        return subprocess.run(["git", "-C", str(cls.repo), *args], check=True,
-                              capture_output=True, text=True, env=env).stdout
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@e",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@e",
+        }
+        return subprocess.run(
+            ["git", "-C", str(cls.repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout
 
     def _cli(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([sys.executable, str(SCRIPT), *args],
-                              cwd=self.repo, capture_output=True, text=True)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+        )
 
     def test_seeded_leak_exits_1(self):
         out = self._cli("--diff", f"{self.base}...{self.head}")
@@ -269,7 +321,9 @@ class CliAgainstRealGit(unittest.TestCase):
 
     def test_text_file_with_leak_exits_1(self):
         body = self.repo / "body.md"
-        body.write_text("- deploy touched 192.168.7.7 tonight\n")  # leak-guard-allow: fixture
+        body.write_text(
+            "- deploy touched 192.168.7.7 tonight\n"
+        )  # leak-guard-allow: fixture
         out = self._cli("--text-file", str(body))
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("rfc1918-ip", out.stderr)
@@ -279,8 +333,11 @@ class CliAgainstRealGit(unittest.TestCase):
         body.write_text("closes infra-public#46\n")
         self.assertEqual(self._cli("--text-file", str(body)).returncode, 1)
         self.assertEqual(
-            self._cli("--text-file", str(body),
-                      "--allow-repo-ref", "infra-public").returncode, 0)
+            self._cli(
+                "--text-file", str(body), "--allow-repo-ref", "infra-public"
+            ).returncode,
+            0,
+        )
 
     def test_no_source_argument_is_a_usage_error(self):
         self.assertEqual(self._cli().returncode, 2)

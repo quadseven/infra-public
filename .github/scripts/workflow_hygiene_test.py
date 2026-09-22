@@ -220,7 +220,10 @@ class CurlTimeouts(unittest.TestCase):
 
 class SetE(unittest.TestCase):
     def test_set_e_present_passes(self):
-        self.assertEqual(lint_shell_script(Path("x.sh"), "#!/bin/sh\nset -euo pipefail\necho hi\n"), [])
+        self.assertEqual(
+            lint_shell_script(Path("x.sh"), "#!/bin/sh\nset -euo pipefail\necho hi\n"),
+            [],
+        )
 
     def test_missing_set_e_fails(self):
         errors = lint_shell_script(Path("x.sh"), "#!/bin/sh\necho hi\n")
@@ -234,10 +237,14 @@ class SetE(unittest.TestCase):
         # CodeRabbit #61: the rule's own doc claims `bash -e` satisfies it,
         # but the regex only matched an explicit `set -e` line - this
         # pins the fix.
-        self.assertEqual(lint_shell_script(Path("x.sh"), "#!/bin/bash -e\necho hi\n"), [])
+        self.assertEqual(
+            lint_shell_script(Path("x.sh"), "#!/bin/bash -e\necho hi\n"), []
+        )
 
     def test_shebang_without_dash_e_still_fails(self):
-        self.assertEqual(len(lint_shell_script(Path("x.sh"), "#!/bin/bash\necho hi\n")), 1)
+        self.assertEqual(
+            len(lint_shell_script(Path("x.sh"), "#!/bin/bash\necho hi\n")), 1
+        )
 
 
 class JobTimeouts(unittest.TestCase):
@@ -245,73 +252,85 @@ class JobTimeouts(unittest.TestCase):
         # Regression test for the MULTILINE anchor bug: timeout-minutes:
         # sitting after runs-on: (i.e. NOT the first line of the job's
         # block) must still be detected.
-        text = "\n".join([
-            "jobs:",
-            "  build:",
-            "    runs-on: ubuntu-latest",
-            "    timeout-minutes: 10",
-            "    steps:",
-            "      - run: echo hi",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  build:",
+                "    runs-on: ubuntu-latest",
+                "    timeout-minutes: 10",
+                "    steps:",
+                "      - run: echo hi",
+            ]
+        )
         self.assertEqual(lint_job_timeouts(DUMMY, text), [])
 
     def test_job_with_templated_timeout_input_passes(self):
-        text = "\n".join([
-            "jobs:",
-            "  smoke:",
-            "    runs-on: ${{ inputs.runner }}",
-            "    timeout-minutes: ${{ inputs.timeout-minutes }}",
-            "    steps:",
-            "      - run: echo hi",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  smoke:",
+                "    runs-on: ${{ inputs.runner }}",
+                "    timeout-minutes: ${{ inputs.timeout-minutes }}",
+                "    steps:",
+                "      - run: echo hi",
+            ]
+        )
         self.assertEqual(lint_job_timeouts(DUMMY, text), [])
 
     def test_job_missing_timeout_fails(self):
-        text = "\n".join([
-            "jobs:",
-            "  build:",
-            "    runs-on: ubuntu-latest",
-            "    steps:",
-            "      - run: echo hi",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  build:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - run: echo hi",
+            ]
+        )
         errors = lint_job_timeouts(DUMMY, text)
         self.assertEqual(len(errors), 1)
         self.assertIn("job `build`", errors[0])
 
     def test_reusable_caller_job_with_uses_is_exempt(self):
-        text = "\n".join([
-            "jobs:",
-            "  call-check:",
-            "    uses: ./.github/workflows/check.python.yml",
-            "    with:",
-            "      runner: ubuntu-latest",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  call-check:",
+                "    uses: ./.github/workflows/check.python.yml",
+                "    with:",
+                "      runner: ubuntu-latest",
+            ]
+        )
         self.assertEqual(lint_job_timeouts(DUMMY, text), [])
 
     def test_allow_marker_suppresses(self):
-        text = "\n".join([
-            "jobs:",
-            "  build:",
-            "    runs-on: ubuntu-latest",
-            "    # hygiene: allow-no-timeout-minutes short-lived, self-limiting job",
-            "    steps:",
-            "      - run: echo hi",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  build:",
+                "    runs-on: ubuntu-latest",
+                "    # hygiene: allow-no-timeout-minutes short-lived, self-limiting job",
+                "    steps:",
+                "      - run: echo hi",
+            ]
+        )
         self.assertEqual(lint_job_timeouts(DUMMY, text), [])
 
     def test_two_jobs_only_second_missing_timeout(self):
-        text = "\n".join([
-            "jobs:",
-            "  build:",
-            "    runs-on: ubuntu-latest",
-            "    timeout-minutes: 10",
-            "    steps:",
-            "      - run: echo one",
-            "  test:",
-            "    runs-on: ubuntu-latest",
-            "    steps:",
-            "      - run: echo two",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  build:",
+                "    runs-on: ubuntu-latest",
+                "    timeout-minutes: 10",
+                "    steps:",
+                "      - run: echo one",
+                "  test:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - run: echo two",
+            ]
+        )
         errors = lint_job_timeouts(DUMMY, text)
         self.assertEqual(len(errors), 1)
         self.assertIn("job `test`", errors[0])
@@ -322,13 +341,15 @@ class CurlOutsideRunBlocks(unittest.TestCase):
     # `.yml` files.
 
     def test_curl_passed_through_an_input_is_checked(self):
-        text = "\n".join([
-            "jobs:",
-            "  deploy:",
-            "    uses: ./.github/workflows/_reusable.deploy.yml",
-            "    with:",
-            "      smoke-cmd: curl -fsS --max-time 10 http://svc.invalid/healthz",
-        ])
+        text = "\n".join(
+            [
+                "jobs:",
+                "  deploy:",
+                "    uses: ./.github/workflows/_reusable.deploy.yml",
+                "    with:",
+                "      smoke-cmd: curl -fsS --max-time 10 http://svc.invalid/healthz",
+            ]
+        )
         errors = lint_curl_timeouts(DUMMY, text)
         self.assertEqual(len(errors), 1, errors)
 
@@ -379,7 +400,9 @@ def _parity_cases() -> list[tuple[str, str, tuple[int, ...]]]:
         if not m:
             raise ValueError(f"{p.name}: no `# canonical-rule5-lines:` header")
         verdict = m.group(1)
-        expected = () if verdict == "none" else tuple(int(x) for x in verdict.split(","))
+        expected = (
+            () if verdict == "none" else tuple(int(x) for x in verdict.split(","))
+        )
         cases.append((p.name, text, expected))
     return cases
 
@@ -402,13 +425,18 @@ class Rule5Parity(unittest.TestCase):
             for name, text, expected in cases
             if (got := _flagged_lines(lint_curl_timeouts(Path(name), text))) != expected
         ]
-        print(f"rule 5 parity: port vs recorded canonical, {len(cases)} case(s) compared", file=sys.stderr)
+        print(
+            f"rule 5 parity: port vs recorded canonical, {len(cases)} case(s) compared",
+            file=sys.stderr,
+        )
         self.assertEqual(drift, [], "\n".join(drift))
 
     def test_the_recorded_verdicts_match_the_live_canonical_linter(self):
         linter = os.environ.get("CANONICAL_HYGIENE_LINTER")
         if not linter:
-            self.skipTest("CANONICAL_HYGIENE_LINTER unset - the recorded verdicts stand in")
+            self.skipTest(
+                "CANONICAL_HYGIENE_LINTER unset - the recorded verdicts stand in"
+            )
         spec = importlib.util.spec_from_file_location("canonical_hygiene", linter)
         self.assertTrue(spec and spec.loader, linter)
         canon = importlib.util.module_from_spec(spec)
@@ -421,9 +449,13 @@ class Rule5Parity(unittest.TestCase):
         drift = [
             f"{name}: recorded {list(expected)}, canonical now {list(live)}"
             for name, text, expected in cases
-            if (live := _flagged_lines(canon.lint_curl_timeouts(Path(name), text))) != expected
+            if (live := _flagged_lines(canon.lint_curl_timeouts(Path(name), text)))
+            != expected
         ]
-        print(f"rule 5 parity: live canonical vs recorded, {len(cases)} case(s) compared", file=sys.stderr)
+        print(
+            f"rule 5 parity: live canonical vs recorded, {len(cases)} case(s) compared",
+            file=sys.stderr,
+        )
         self.assertEqual(drift, [], "\n".join(drift))
 
 
