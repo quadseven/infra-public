@@ -9,6 +9,13 @@ name: leak-scan
 # `edited` is in the trigger list on purpose: the PR title and body are
 # scanned too, and a body can leak long after the last push.
 #
+# `issues` is in the trigger list for the same reason a diff alone was never
+# enough for PRs (infra-public#74/#71): a leak written into an ISSUE body -
+# including one filed by automation, which is how #71's happened - has no
+# diff and no PR to gate. `issues: write` below is used ONLY on that path, to
+# comment a finding back onto the issue; the pull_request path never touches
+# it and stays read-only.
+#
 # The `uses:` pin below is a commit on the branch that introduced this file,
 # because a workflow cannot pin a SHA that does not exist yet. Bump it to the
 # merge commit once this lands, the same as any other pin here.
@@ -23,16 +30,21 @@ name: leak-scan
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  issues:
+    types: [opened, edited]
 
 jobs:
   leak-scan:
     uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@6775be8ebb40962917b6ec806dfd9f0d4dafd771
     permissions:
       contents: read
+      issues: write
     with:
       allowed-repo-refs: infra
-      # This repo IS the scanner's home, so it scans with the tree under review
-      # rather than with main: a change to the patterns is exercised by the guard
-      # it changes, in the PR that changes it. Consumer repos leave this alone
-      # and take main.
-      scanner-ref: ${{ github.event.pull_request.head.sha }}
+      # This repo IS the scanner's home, so a PR scans with the tree under
+      # review rather than with main: a change to the patterns is exercised
+      # by the guard it changes, in the PR that changes it. Consumer repos
+      # leave this alone and take main. An `issues` event has no PR and
+      # therefore no head sha - github.event.pull_request.head.sha is null
+      # there, which the `||` falls back from, same as it always has for main.
+      scanner-ref: ${{ github.event.pull_request.head.sha || 'main' }}
