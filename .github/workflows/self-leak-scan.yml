@@ -35,7 +35,7 @@ on:
 
 jobs:
   leak-scan:
-    uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@6775be8ebb40962917b6ec806dfd9f0d4dafd771
+    uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@e8ef3a69defd33fefcb0fe87c43cb9163826d01d
     permissions:
       contents: read
       issues: write
