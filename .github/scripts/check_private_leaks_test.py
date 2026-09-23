@@ -89,6 +89,27 @@ class GenericShapes(unittest.TestCase):
         self.assertEqual(hits("timings 01:02:03 and 1.2.3"), [])
 
 
+class StrayMention(unittest.TestCase):
+    """A mention notifies and subscribes a real user; it cannot be undone."""
+
+    def test_bare_mention_is_caught(self):
+        self.assertIn("stray-mention", hits("@grug re-review")[0])  # leak-guard-allow: fixture
+
+    def test_mention_mid_sentence_is_caught(self):
+        self.assertIn("stray-mention", hits("thanks @grug, looks good")[0])  # leak-guard-allow: fixture
+
+    def test_backticked_handle_is_clean(self):
+        self.assertEqual(hits("never write `@grug` on GitHub"), [])
+
+    def test_slash_command_and_bot_name_are_clean(self):
+        self.assertEqual(hits("/grug improve, or ask grug-tribe[bot]"), [])
+
+    def test_email_and_decorator_are_clean(self):
+        for text in ("mail grug@example.com", "@grug_command", "@grug.register"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), [])
+
+
 class LocalUserPaths(unittest.TestCase):
     """AGENTS.md forbids a path that reveals a real local username. The runner
     and container accounts must stay clean or every Actions log line is a hit."""

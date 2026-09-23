@@ -126,6 +126,19 @@ PATTERNS: list[tuple[str, str, str]] = [
         r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b",
         "a MAC address (a real device identifier)",
     ),
+    (
+        "stray-mention",
+        # AGENTS.md: "an @-mention of anyone who is not already part of the
+        # conversation". The one exception to "shapes, never instances": this
+        # handle is already public, it is the review bot's NAME but a real,
+        # unrelated user's HANDLE, and agents keep writing it believing it
+        # summons the bot. A backticked handle is a code span, not a mention,
+        # so the backtick lookbehind keeps the policy text itself clean; the
+        # lookbehind/ahead also keep an email address and a decorator clean.
+        r"(?<![\w`.@/-])@grug(?![\w.-])",  # leak-guard-allow: the pattern itself
+        "an @-mention of an unrelated real user (the bot is grug-tribe[bot], "
+        "driven by /grug commands); a mention notifies and subscribes them",
+    ),
 ]
 
 # The cross-repo-ref rule is not in PATTERNS because it is not a constant: the
