@@ -352,7 +352,15 @@ def scan(
                 continue  # file headers carry paths, not content
             if line.startswith("-"):
                 continue  # a removal is a scrub; never block it
-            payload = line[1:] if line.startswith("+") else line
+            if line.startswith(("rename from ", "copy from ")):
+                continue  # the OLD name of a renamed file: also a scrub
+            if line.startswith("diff --git "):
+                # Carries the old AND new path. Renaming a file whose name
+                # leaked must not be blocked by its old name, so only the
+                # new (b/) side is scanned.
+                payload = line.rsplit(" b/", 1)[-1]
+            else:
+                payload = line[1:] if line.startswith("+") else line
         else:
             payload = line
         if any(m in payload for m in ALLOW_MARKERS):

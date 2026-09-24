@@ -225,6 +225,23 @@ class DiffSemantics(unittest.TestCase):
         text = "--- a/10.1.2.3.txt\n+++ b/10.1.2.3.txt\n"  # leak-guard-allow: fixture
         self.assertEqual(hits(text, diff_mode=True), [])
 
+    def test_renaming_a_leaking_file_name_away_is_not_blocked(self):
+        # A rename's old name appears in `diff --git a/<old> b/<new>` and
+        # `rename from <old>`. Renaming a file whose name leaked is a scrub.
+        text = ("diff --git a/srv-thing-01.md b/notes.md\n"  # leak-guard-allow: fixture
+                "similarity index 90%\n"
+                "rename from srv-thing-01.md\n"  # leak-guard-allow: fixture
+                "rename to notes.md\n")
+        self.assertEqual(hits(text, diff_mode=True), [])
+
+    def test_renaming_to_a_leaking_file_name_is_blocked(self):
+        text = ("diff --git a/notes.md b/srv-thing-01.md\n"  # leak-guard-allow: fixture
+                "rename from notes.md\n"
+                "rename to srv-thing-01.md\n")  # leak-guard-allow: fixture
+        found = hits(text, diff_mode=True)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(all("server-hostname" in h for h in found))
+
     def test_markdown_bullet_is_scanned_in_text_mode(self):
         # The same leading `-` that means "removal" in a diff means "bullet" in
         # a PR body, and most of the leaks this guard exists for were prose.
