@@ -26,6 +26,18 @@ name: leak-scan
 # blocked. Whether that convention should change is a separate call; blocking
 # it here would only mean this guard gets switched off. This repo's own
 # `infra-public#123` refs are always exempt and need no entry.
+#
+# DENY-LIST LAYER, PR runs only. Terms with no generic shape (people,
+# products, projects) are read at run time from the SSM parameter below,
+# through the role in the LEAK_SCAN_ROLE_ARN secret. That role can read this
+# one parameter and nothing else, and trusts only pull_request runs of the
+# public repos that share it. An `issues` run carries a branch subject, not a
+# pull_request one, so it cannot assume the role: passing the parameter there
+# would make every issue scan fail closed on an AccessDenied. The parameter is
+# therefore set on pull_request only, and issue runs keep the generic shapes.
+# The terms never live in this repo, the log shows only how many were
+# loaded, and a hit is redacted. A fork PR gets no secrets, so the scan fails
+# closed there rather than running without the list.
 
 on:
   pull_request:
@@ -35,10 +47,12 @@ on:
 
 jobs:
   leak-scan:
-    uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@e8ef3a69defd33fefcb0fe87c43cb9163826d01d
+    uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@273755079c88172df39501ee6914fd878c0920bc
     permissions:
       contents: read
       issues: write
+      # Mint the OIDC token for the deny-list read role (PR runs).
+      id-token: write
     with:
       allowed-repo-refs: infra
       # This repo IS the scanner's home, so a PR scans with the tree under
@@ -48,3 +62,6 @@ jobs:
       # therefore no head sha - github.event.pull_request.head.sha is null
       # there, which the `||` falls back from, same as it always has for main.
       scanner-ref: ${{ github.event.pull_request.head.sha || 'main' }}
+      deny-list-ssm-param: ${{ github.event_name == 'pull_request' && '/infra/leak-scan/deny-list' || '' }}
+    secrets:
+      aws-role-arn: ${{ secrets.LEAK_SCAN_ROLE_ARN }}
