@@ -38,7 +38,9 @@ from unittest import mock
 
 from check_private_leaks import (
     build_patterns,
+    deny_rule,
     load_ssm_deny_list,
+    parse_deny_list,
     repo_ref_pattern,
     scan,
 )
@@ -211,9 +213,42 @@ class SsmDenyList(unittest.TestCase):
             return load_ssm_deny_list("/some/param")
 
     def test_terms_become_rules(self):
-        rules = self._run(0, "alpha beta\n")
+        rules = self._run(0, "alpha\nbeta\n")
         self.assertEqual(len(rules), 2)
         self.assertIn("deny-list", scan("the alpha thing", rules, label="t")[0])
+
+    def test_one_term_per_line_keeps_a_phrase_whole(self):
+        # A full name is ONE term. Whitespace splitting would make each word
+        # its own rule, so the second word alone would fire on prose.
+        rules = self._run(0, "ada lovelace\n")
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(scan("lovelace alone", rules, label="t"), [])
+        self.assertEqual(len(scan("met Ada Lovelace", rules, label="t")), 1)
+
+    def test_comments_and_blanks_are_not_terms(self):
+        # The real deny-list documents itself with `#` lines. Read as terms,
+        # every word of a comment would fire on ordinary prose.
+        raw = "# operator identity: first name, surname\n\n  alpha  \n# x\n"
+        self.assertEqual(parse_deny_list(raw), ["alpha"])
+
+    def test_duplicates_collapse_case_insensitively(self):
+        self.assertEqual(parse_deny_list("Alpha\nalpha\nALPHA\n"), ["Alpha"])
+
+    def test_comment_only_parameter_is_fatal(self):
+        # Present but with no active term is the same inert layer as empty.
+        with self.assertRaises(SystemExit) as cm:
+            self._run(0, "# nothing here yet\n")
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_missing_aws_cli_is_fatal_not_a_finding(self):
+        # Exit 1 means "found a leak" and warn mode softens it to green; a
+        # scanner that could not even start must exit 2.
+        with mock.patch("check_private_leaks.subprocess.run",
+                        side_effect=FileNotFoundError("aws")):
+            with self.assertRaises(SystemExit) as cm:
+                load_ssm_deny_list("/some/param")
+        self.assertEqual(cm.exception.code, 2)
+
 
     def test_aws_failure_is_fatal(self):
         with self.assertRaises(SystemExit) as cm:
@@ -225,6 +260,48 @@ class SsmDenyList(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self._run(0, "\n")
         self.assertEqual(cm.exception.code, 2)
+
+
+    def test_undecodable_cli_output_is_fatal_not_a_finding(self):
+        err = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch("check_private_leaks.subprocess.run", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                load_ssm_deny_list("/some/param")
+        self.assertEqual(cm.exception.code, 2)
+
+
+class DenyRuleAnchoring(unittest.TestCase):
+    def test_short_name_does_not_fire_inside_a_word(self):
+        self.assertIsNone(deny_rule("ada").search("flights to canada"))
+
+    def test_short_name_fires_as_a_word(self):
+        self.assertIsNotNone(deny_rule("ada").search("thanks, Ada."))
+
+    def test_path_prefix_matches_mid_path(self):
+        # Edge is `/`, so no boundary is added on that side.
+        self.assertIsNotNone(deny_rule("/home/ada").search("x=/home/ada/src"))  # leak-guard-allow: fixture
+
+    def test_domain_suffix_matches_mid_hostname(self):
+        self.assertIsNotNone(deny_rule(".example.net").search("h1.example.net"))
+
+    def test_term_is_regex_escaped(self):
+        self.assertIsNone(deny_rule("a.b").search("axb"))
+
+
+class DenyListRedaction(unittest.TestCase):
+    """Findings print to a PUBLIC log. A deny-list hit must never echo the
+    protected term there; a shape hit still shows its match."""
+
+    def test_deny_hit_is_redacted(self):
+        rules = RULES + [("deny-list", deny_rule("zyxwv"), "denied")]
+        out = scan("hello zyxwv here", rules, label="t")
+        self.assertEqual(len(out), 1)
+        self.assertNotIn("zyxwv", out[0].lower())
+        self.assertIn("<redacted, 5 chars>", out[0])
+
+    def test_shape_hit_is_still_shown(self):
+        out = hits("host 10.1.2.3")  # leak-guard-allow: fixture
+        self.assertIn("10.1.2.3", out[0])  # leak-guard-allow: fixture
 
 
 class CliAgainstRealGit(unittest.TestCase):

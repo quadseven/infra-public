@@ -112,7 +112,7 @@ on:
         type: string
         default: ""
       deny-list-ssm-param:
-        description: "SSM parameter holding whitespace-separated terms with no generic shape (products, projects, people). Empty = generic shapes only. When set, the aws-role-arn secret is REQUIRED and an unreadable or empty parameter fails the check."
+        description: "SSM parameter holding terms with no generic shape (products, projects, people), ONE TERM PER LINE (a full name is one term; blank lines and # comments are ignored). A hit on a deny-list term is redacted in the log, never echoed. Empty = generic shapes only. When set, the aws-role-arn secret is REQUIRED and an unreadable parameter, or one with no active term, fails the check."
         required: false
         type: string
         default: ""
