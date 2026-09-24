@@ -90,6 +90,16 @@ class GenericShapes(unittest.TestCase):
     def test_version_string_is_not_a_mac(self):
         self.assertEqual(hits("timings 01:02:03 and 1.2.3"), [])
 
+    def test_longer_dotted_number_run_is_not_an_ip(self):
+        # An SVG path or a version string holds runs of dotted numbers; four
+        # octets taken from the middle of a longer run are not an address.
+        # Found by the first full-tree sweep (an inline SVG logo).
+        self.assertEqual(hits('d="M7.86 10.92.58.11.79-.25"'), [])
+        self.assertEqual(hits("v1.10.2.3.4 and 1.100.64.1.1"), [])
+
+    def test_ip_at_end_of_sentence_is_still_caught(self):
+        self.assertIn("rfc1918-ip", hits("the host was 10.1.2.3.")[0])  # leak-guard-allow: fixture
+
 
 class StrayMention(unittest.TestCase):
     """A mention notifies and subscribes a real user; it cannot be undone."""
@@ -128,6 +138,16 @@ class LocalUserPaths(unittest.TestCase):
     def test_ci_runner_home_is_clean(self):
         self.assertEqual(hits("/home/runner/work/repo/repo"), [])
 
+    def test_url_path_is_not_a_home_directory(self):
+        # github.com/users/<org>/projects is a web page. Found by the first
+        # full-tree sweep.
+        self.assertEqual(hits("https://github.com/users/someorg/projects/1"), [])
+
+    def test_home_path_after_a_quote_or_colon_is_caught(self):
+        for text in ('"/Users/somebody/x"', "PATH=/bin:/home/somebody/bin"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertIn("local-user-path", hits(text)[0])
+
     def test_container_and_placeholder_accounts_are_clean(self):
         for p in ("/home/root/x", "/home/node/app", "/Users/you/dev", "/home/appuser/x"):
             with self.subTest(path=p):
@@ -154,6 +174,18 @@ class CrossRepoRefs(unittest.TestCase):
         # let the whole qualified ref sail through - the form that names
         # the owner too.
         self.assertIn("private-issue-ref", hits("see someone/someplace#12")[0])  # leak-guard-allow: fixture
+
+    def test_all_caps_key_prefix_is_not_a_repo(self):
+        # Sort-key prefixes (`USER#1`, `INST#42`) and "PR#734" are not repo
+        # refs. Found by the first full-tree sweep: 30+ test fixtures.
+        for text in ("pk USER#100", "sk INST#42", "see #730/PR#734", "REVIEW#7"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), [])
+
+    def test_lower_and_mixed_case_repo_refs_are_still_caught(self):
+        for text in ("see someplace#12", "see SomePlace#12", "see some-place#12"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertIn("private-issue-ref", hits(text)[0])
 
     def test_bare_issue_number_is_clean(self):
         self.assertEqual(hits("closes #123"), [])
@@ -388,6 +420,104 @@ class CliAgainstRealGit(unittest.TestCase):
     def test_no_source_argument_is_a_usage_error(self):
         self.assertEqual(self._cli().returncode, 2)
 
+
+
+class TreeMode(unittest.TestCase):
+    """--tree: the scheduled sweep of every tracked file. Same exit-code
+    contract as the diff and text modes, plus: every hit is redacted, and a
+    sweep that listed nothing fails closed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        self._git("init", "-q", "-b", "main")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _git(self, *args: str) -> str:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True, env=env).stdout
+
+    def _commit(self, files: dict[str, bytes]) -> None:
+        for name, data in files.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "c")
+
+    def _cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([sys.executable, str(SCRIPT), "--tree", *args],
+                              cwd=cwd or self.repo, capture_output=True, text=True)
+
+    def test_clean_tree_exits_0_and_says_what_it_scanned(self):
+        self._commit({"a.md": b"nothing here\n", "b/c.py": b"x = 1\n"})
+        out = self._cli()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("2 tracked files", out.stdout)
+
+    def test_existing_leak_exits_1_with_its_match_redacted(self):
+        self._commit({"docs/notes.md": b"ok\nthe box at 10.9.8.7 is up\n"})  # leak-guard-allow: fixture
+        out = self._cli()
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("docs/notes.md:2", out.stderr)
+        self.assertIn("rfc1918-ip", out.stderr)
+        self.assertIn("<redacted, 8 chars>", out.stderr)
+        self.assertNotIn("10.9.8.7", out.stdout + out.stderr)  # leak-guard-allow: fixture
+
+    def test_file_name_is_scanned_too(self):
+        self._commit({"srv-thing-01.md": b"clean\n"})  # leak-guard-allow: fixture
+        out = self._cli()
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("(path)", out.stderr)
+        self.assertIn("server-hostname", out.stderr)
+        self.assertNotIn("srv-thing-01", out.stderr)  # leak-guard-allow: fixture
+
+    def test_binary_file_is_skipped_and_counted(self):
+        self._commit({"img.bin": b"\x00\x01 10.9.8.7", "a.md": b"fine\n"})  # leak-guard-allow: fixture
+        out = self._cli()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("1 binary files skipped", out.stdout)
+
+    def test_allow_marker_still_applies(self):
+        self._commit({"a.md": b"10.9.8.7 leak-guard-allow: documented\n"})  # leak-guard-allow: fixture
+        self.assertEqual(self._cli().returncode, 0)
+
+    def test_deny_list_hit_is_found_and_redacted(self):
+        self._commit({"a.md": b"ping zyxwv now\n"})
+        completed = subprocess.CompletedProcess([], 0, stdout="zyxwv\n", stderr="")
+        # The CLI reads SSM via the aws CLI; exercise the in-process path.
+        with mock.patch("check_private_leaks.subprocess.run", return_value=completed):
+            deny = load_ssm_deny_list("/x")
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            from check_private_leaks import scan_tree
+            found, _lines, _bins = scan_tree(["a.md"], RULES + deny)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(len(found), 1)
+        self.assertNotIn("zyxwv", found[0])
+        self.assertIn("<redacted, 5 chars>", found[0])
+
+    def test_outside_a_git_repo_exits_2(self):
+        with tempfile.TemporaryDirectory() as bare:
+            out = self._cli(cwd=Path(bare))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("FATAL", out.stderr)
+
+    def test_repo_with_no_tracked_files_exits_2(self):
+        out = self._cli()
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("no files", out.stderr)
+
+    def test_tree_is_exclusive_with_other_sources(self):
+        self._commit({"a.md": b"x\n"})
+        out = self._cli("--text-file", "a.md")
+        self.assertEqual(out.returncode, 2)
 
 if __name__ == "__main__":
     unittest.main()

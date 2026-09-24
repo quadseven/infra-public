@@ -1,4 +1,4 @@
-name: _reusable · Leak scan (PR diff + PR/issue text)
+name: _reusable · Leak scan (PR diff + PR/issue text, or full tree)
 
 # PURPOSE: a public repo must not publish private-infrastructure identifiers -
 #   hostnames, private-range IPs, device identifiers, local user paths,
@@ -29,6 +29,19 @@ name: _reusable · Leak scan (PR diff + PR/issue text)
 #   look. The text reaches the scanner through a FILE fed by env, never
 #   interpolated into the run body: a title is attacker-controlled text and
 #   `${{ }}` inside a `run:` is a shell injection.
+#
+# FULL-TREE MODE (`mode: full-tree`). A diff scan only sees what a PR adds,
+#   so an identifier already in the tree when the guard was switched on sits
+#   there unflagged forever (infra#4639: a public repo's source still named
+#   private hosts long after its PR guard went live). This mode checks out the
+#   caller's default branch and scans every tracked file and path. Meant for a
+#   weekly `schedule` (plus `workflow_dispatch`) in the caller. Any hit fails
+#   the run, and EVERY hit is redacted - shape hits too, unlike PR mode: a
+#   sweep's public log would otherwise be a tidy index of every private
+#   identifier left in the repo. The path and line number are enough to act.
+#   Deny-list note: a scheduled run's OIDC subject is the branch ref, not
+#   `pull_request`, so the deny-list role must trust that subject too; a role
+#   that does not fails the run closed (step 7), never silently to shapes-only.
 #
 # WHERE THE SCRIPT COMES FROM. One copy, in this repo, fetched at `scanner-ref`
 #   (default `main`). Not vendored per repo: a scanner copied into 17 repos is 17
@@ -98,6 +111,19 @@ name: _reusable · Leak scan (PR diff + PR/issue text)
 #       # PR-triggered run of the same caller never touches it.
 #       permissions: { contents: read, issues: write }
 #
+# Example full-tree caller (a separate workflow file, e.g.
+# .github/workflows/leak-scan.full-tree.yml):
+#   on:
+#     schedule:
+#       - cron: "17 9 * * 1"   # weekly
+#     workflow_dispatch:
+#   jobs:
+#     leak-scan:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
+#       permissions: { contents: read }
+#       with:
+#         mode: full-tree
+#
 # Example caller WITH the deny-list layer (needs OIDC + a role that can read
 # exactly that one parameter):
 #   jobs:
@@ -112,6 +138,11 @@ name: _reusable · Leak scan (PR diff + PR/issue text)
 on:
   workflow_call:
     inputs:
+      mode:
+        description: "pr (default) = scan the PR diff and the PR/issue title+body, on pull_request or issues events. full-tree = scan every tracked file and path of the checked-out ref (the default branch on schedule/workflow_dispatch), all hits redacted; for a scheduled sweep."
+        required: false
+        type: string
+        default: "pr"
       allowed-repo-refs:
         description: "Comma-separated repo names whose `<name>#123` refs are fine. The calling repo's own name is always allowed and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
         required: false
@@ -176,14 +207,31 @@ jobs:
     # never cancel each other, and a PR never cancels an issue's run or vice
     # versa (the two number sequences are independent, this is belt-and-braces).
     concurrency:
-      group: leak-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: leak-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
       cancel-in-progress: true
     steps:
-      - name: "1. Refuse to run outside a pull_request or issues event"
+      - name: "1. Refuse an unknown mode, or an event the mode does not support"
         env:
           EVENT: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          # full-tree reads only the caller's own checked-out tree - no
+          # title/body, no diff - so it is not tied to a PR or issue. The
+          # same refusal of pull_request_target applies (see below).
+          if [ "$MODE" = "full-tree" ]; then
+            case "$EVENT" in
+              schedule|workflow_dispatch|push|pull_request) exit 0 ;;
+              *)
+                echo "::error::mode full-tree supports schedule, workflow_dispatch, push and pull_request (got '$EVENT'). pull_request_target is refused by design."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ "$MODE" != "pr" ]; then
+            echo "::error::unknown mode '$MODE' (expected 'pr' or 'full-tree')"
+            exit 1
+          fi
           # pull_request_target is deliberately NOT accepted: it runs with the
           # base repo's token against attacker-authored head content, and this
           # workflow reads that content. A guard is not worth a token leak.
@@ -200,11 +248,12 @@ jobs:
         # this on an issues event, not just the diff step below, is what lets
         # a caller grant this job read-only contents access for its PR path
         # while still running the issues path with no checkout at all.
-        if: github.event_name == 'pull_request'
+        # full-tree needs the tree, not the history: depth 1 is enough.
+        if: github.event_name == 'pull_request' || inputs.mode == 'full-tree'
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           path: _repo
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.mode == 'full-tree' && 1 || 0 }}
           persist-credentials: false
 
       - name: "3. Resolve which infra-public revision the scanner comes from"
@@ -300,9 +349,10 @@ jobs:
           role-to-assume: ${{ secrets.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
-      - name: "8. Scan the diff (PR only) and the title/body (PR or issue)"
+      - name: "8. Scan the diff (PR only) and the title/body (PR or issue), or the full tree"
         id: scan
         env:
+          MODE: ${{ inputs.mode }}
           EVENT: ${{ github.event_name }}
           SCANNER: ${{ github.workspace }}/_scanner/.github/scripts/check_private_leaks.py
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -332,6 +382,16 @@ jobs:
           done < <(printf '%s\n' "$EXTRA_REFS" | tr ',' '\n')
           if [ -n "$DENY_PARAM" ]; then
             args+=(--deny-list-ssm "$DENY_PARAM")
+          fi
+
+          if [ "$MODE" = "full-tree" ]; then
+            # Every tracked file and path; hits redacted by the scanner.
+            # Exit 2 (nothing listed, unreadable file) stays 2.
+            rc_tree=0
+            echo "--- full tree ---"
+            ( cd _repo && python3 "$SCANNER" --tree "${args[@]}" ) || rc_tree=$?
+            echo "worst=$rc_tree" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           rc_diff=0
