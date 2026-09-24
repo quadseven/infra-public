@@ -52,8 +52,21 @@ USAGE
     check_private_leaks.py --staged                     # pre-commit: staged diff
     check_private_leaks.py --diff BASE...HEAD           # CI: a PR's diff
     check_private_leaks.py --text-file body.md          # an issue/PR body
+    check_private_leaks.py --tree                       # every tracked file
     check_private_leaks.py --diff A...B --allow-repo-ref my-repo
     check_private_leaks.py --text-file b.md --deny-list-ssm /path/to/param
+
+FULL-TREE MODE (--tree)
+-----------------------
+A diff scan only sees what a PR adds, so an identifier that was already in the
+tree when the guard was switched on is never flagged. --tree scans every file
+`git ls-files` reports (plus each path itself, since a file name can carry a
+host name), for a scheduled sweep. Every hit is redacted, shape hits included:
+the log of a sweep is public, and echoing each match would publish a neat
+index of every private identifier left in the repo. The path and line number
+are enough to find it. Binary files (a NUL byte in the first 8 KiB) are
+skipped and counted. `git ls-files` failing, or listing no files, exits 2: a
+sweep that looked at nothing must not report clean.
 
 RELATIONSHIP TO grug's COPY
 ---------------------------
@@ -91,6 +104,7 @@ it must read it the same way:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -106,13 +120,16 @@ PATTERNS: list[tuple[str, str, str]] = [
     ),
     (
         "tailscale-ip",
-        r"\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b",
+        # The (?<![\d.]) / (?!\.\d) guards keep a run of dotted numbers (an
+        # SVG path's "7.86 10.92.58.11.79", a version string) from matching:
+        # an address is exactly four octets, not four taken from a longer run.
+        r"(?<![\d.])\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b(?!\.\d)",
         "a CGNAT/Tailscale IP (the 100.64/10 range)",  # leak-guard-allow: RFC range, not a host
     ),
     (
         "rfc1918-ip",
-        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
-        r"|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})\b",
+        r"(?<![\d.])\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})\b(?!\.\d)",
         "a private-range IP address",
     ),
     (
@@ -131,7 +148,9 @@ PATTERNS: list[tuple[str, str, str]] = [
         # holds the accounts that are a CI runner or a container convention, not
         # a person - /home/runner/work is on every Actions log line - plus the
         # placeholder names docs are supposed to use.
-        r"(?:/Users/|/home/|[A-Za-z]:\\Users\\)"
+        # The lookbehind keeps a URL path out: `github.com/users/<org>` is
+        # a web page, not a home directory. A real path starts the token.
+        r"(?:(?<![\w.])/Users/|(?<![\w.])/home/|[A-Za-z]:\\Users\\)"
         r"(?!(?:runner|root|ubuntu|user|username|node|vscode|git|app|appuser|"
         r"jenkins|actions|circleci|docker|linuxbrew|ec2-user|nobody|www-data|"
         r"you|me|name|example|your-name|placeholder)\b)"
@@ -308,7 +327,14 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
     return [(DENY, deny_rule(t), "an explicitly denied term") for t in terms]
 
 
-def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
+def scan(
+    text: str,
+    rules,
+    *,
+    label: str,
+    diff_mode: bool = False,
+    redact_all: bool = False,
+) -> list[str]:
     """Scan text for private identifiers.
 
     `diff_mode` is NOT cosmetic. In a diff, a line starting with `-` is a
@@ -316,6 +342,8 @@ def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
     guard forbid its own remedy. In plain text (an issue or PR body) a leading
     `-` is a markdown bullet and must be scanned like any other line. The two
     cannot be told apart by looking, so the caller says which it has.
+
+    `redact_all` hides shape hits too (full-tree mode; see the module doc).
     """
     hits: list[str] = []
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -324,7 +352,15 @@ def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
                 continue  # file headers carry paths, not content
             if line.startswith("-"):
                 continue  # a removal is a scrub; never block it
-            payload = line[1:] if line.startswith("+") else line
+            if line.startswith(("rename from ", "copy from ")):
+                continue  # the OLD name of a renamed file: also a scrub
+            if line.startswith("diff --git "):
+                # Carries the old AND new path. Renaming a file whose name
+                # leaked must not be blocked by its old name, so only the
+                # new (b/) side is scanned.
+                payload = line.rsplit(" b/", 1)[-1]
+            else:
+                payload = line[1:] if line.startswith("+") else line
         else:
             payload = line
         if any(m in payload for m in ALLOW_MARKERS):
@@ -338,7 +374,7 @@ def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
                 # enough - the author is looking at their own diff or text.
                 shown = (
                     f"<redacted, {len(m.group(0))} chars>"
-                    if name == DENY
+                    if name == DENY or redact_all
                     else repr(m.group(0))
                 )
                 hits.append(f"  {label}:{lineno}  [{name}] {shown} - {why}")
@@ -372,12 +408,90 @@ def git_diff(args: list[str]) -> str:
     return out.stdout
 
 
+BINARY_SNIFF = 8192
+
+
+def tree_files() -> list[str]:
+    """Every tracked path, via `git ls-files -z`; any failure is fatal.
+
+    An empty list is fatal too: outside a checkout, or on a checkout that
+    fetched nothing, "no files" would otherwise print clean.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z"], capture_output=True, check=False
+        )
+    except OSError as exc:
+        print(f"FATAL: cannot run `git ls-files`: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if out.returncode != 0:
+        print(
+            f"FATAL: `git ls-files` failed (exit {out.returncode}): "
+            f"{out.stderr.decode('utf-8', 'replace').strip()[:300]}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    paths = [p.decode("utf-8", "replace") for p in out.stdout.split(b"\0") if p]
+    if not paths:
+        print(
+            "FATAL: `git ls-files` listed no files - the sweep would scan "
+            "nothing, so it cannot report clean.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return paths
+
+
+def scan_tree(paths: list[str], rules) -> tuple[list[str], int, int]:
+    """Scan each tracked file and each path. Returns (hits, lines, binaries).
+
+    A tracked path that cannot be read is fatal rather than skipped: a sweep
+    that quietly passes over a file it could not open has not swept it. A
+    symlink is scanned as its target string (what git stores), and a
+    submodule (a directory entry) is someone else's tree.
+    """
+    hits: list[str] = []
+    lines = 0
+    binaries = 0
+    for index, path in enumerate(paths, 1):
+        # A path that is itself a hit cannot be the label for its own
+        # finding - that would print the name the redaction hides. It is
+        # named by its position in `git ls-files` order instead.
+        label = path
+        if scan(path, rules, label=path):
+            label = f"<tracked file #{index} in git ls-files order, name redacted>"
+            hits += scan(path, rules, label=f"{label} (path)", redact_all=True)
+        try:
+            if os.path.islink(path):
+                data = os.readlink(path).encode("utf-8", "replace")
+            elif os.path.isdir(path):
+                continue
+            else:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+        except OSError as exc:
+            print(f"FATAL: could not read tracked file {label}: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        if b"\0" in data[:BINARY_SNIFF]:
+            binaries += 1
+            continue
+        text = data.decode("utf-8", "replace")
+        lines += len(text.splitlines())
+        hits += scan(text, rules, label=label, redact_all=True)
+    return hits, lines, binaries
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--staged", action="store_true", help="scan the staged diff")
     src.add_argument("--diff", help="scan `git diff <RANGE>` (use BASE...HEAD)")
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
+    src.add_argument(
+        "--tree",
+        action="store_true",
+        help="scan every tracked file and path (scheduled sweep; all hits redacted)",
+    )
     ap.add_argument("--deny-list-ssm", help="SSM param holding extra terms")
     ap.add_argument(
         "--allow-repo-ref",
@@ -411,6 +525,26 @@ def main() -> int:
         else f"{n_shapes} shape patterns, deny-list not configured "
         "(names and products are not being checked)"
     )
+
+    if args.tree:
+        paths = tree_files()
+        hits, n_lines, n_bin = scan_tree(paths, rules)
+        scanned = (
+            f"{len(paths)} tracked files, {n_lines} lines scanned, "
+            f"{n_bin} binary files skipped"
+        )
+        if not hits:
+            print(f"leak guard: clean ({coverage}, {scanned})")
+            return 0
+        print(
+            f"BLOCKED: {len(hits)} private infrastructure identifier(s) in the "
+            f"tree ({coverage}, {scanned}). Matches are redacted; open each "
+            "path:line below in the repo.\n",
+            file=sys.stderr,
+        )
+        for h in hits:
+            print(h, file=sys.stderr)
+        return 1
 
     if args.staged:
         text = git_diff(["--cached"])
