@@ -290,6 +290,7 @@ jobs:
         if: inputs.cluster-access == 'in-cluster'
         env:
           NAMESPACE: ${{ inputs.namespace }}
+          KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
           RUN_MIGRATE: ${{ inputs.run-migrate }}
           SMOKE_POD: ${{ inputs.smoke-pod-name }}
         run: |
@@ -342,19 +343,39 @@ jobs:
           kubectl auth whoami --request-timeout=20s \
             || { echo "::error::cluster API rejected the runner's ServiceAccount token (unauthorized)"; exit 1; }
 
+          # The target Namespace must already exist: a runner identity is
+          # expected to be scoped to it, and so cannot create it.
+          kubectl get namespace "$NAMESPACE" --request-timeout=20s -o name \
+            || { echo "::error::namespace $NAMESPACE is missing or unreadable; in-cluster mode needs it to exist and be gettable by the runner ServiceAccount"; exit 1; }
+
           # Authorization: every verb this run will use. `auth can-i` exits
           # non-zero on "no" AND on any API error, so each line fails closed.
           checks=(
-            "get namespaces/$NAMESPACE"
             "patch namespaces/$NAMESPACE"
             "create secrets"
             "patch secrets"
-            "patch deployments.apps"
             "get deployments.apps"
             "watch deployments.apps"
           )
           [[ "$RUN_MIGRATE" == "true" ]] && checks+=("create jobs.batch" "delete jobs.batch" "watch jobs.batch")
           [[ -n "$SMOKE_POD" ]] && checks+=("create pods" "delete pods" "watch pods")
+          # Every object `kubectl apply -k` will manage: render the
+          # kustomization and let kubectl map each object to its resource
+          # type (client dry-run: discovery only, nothing is sent). Each type
+          # needs create (first deploy) and patch (every later one). A
+          # cluster-scoped object is checked by name, get + patch, since a
+          # namespace-scoped identity cannot create it.
+          mapfile -t objs < <(kubectl kustomize "$KUSTOMIZE_DIR" | kubectl create --dry-run=client -o name -f -)
+          [[ "${#objs[@]}" -gt 0 ]] || { echo "::error::kustomize-dir $KUSTOMIZE_DIR rendered no objects"; exit 1; }
+          for o in "${objs[@]}"; do
+            type="${o%%/*}"
+            if [[ "$type" == "namespace" ]]; then
+              checks+=("get $o" "patch $o")
+            else
+              checks+=("create $type" "patch $type")
+            fi
+          done
+          mapfile -t checks < <(printf '%s\n' "${checks[@]}" | awk '!seen[$0]++')
           denied=0
           for c in "${checks[@]}"; do
             # shellcheck disable=SC2086  # intentional split: "<verb> <resource>"

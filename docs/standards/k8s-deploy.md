@@ -133,10 +133,13 @@ that pool, and drop `ts-authkey` / `kubeconfig-b64` from the caller (passing
 
 The job writes a kubeconfig that points at the in-cluster API service address
 and reads the pod's projected ServiceAccount token by path (the token is never
-copied). Before the image build, a preflight runs `kubectl version`,
-`kubectl auth whoami`, and `kubectl auth can-i` for each verb the run uses,
-and fails the job if the API is unreachable, the token is rejected, or any
-verb is denied. A deploy that cannot reach or change the cluster therefore
+copied). Before the image build, a preflight runs `kubectl version` and
+`kubectl auth whoami`, checks that `namespace` exists, and runs
+`kubectl auth can-i` for each verb the run uses: the fixed steps (secrets,
+rollout, migrate Job, smoke pod) plus create and patch for every object type
+the rendered `kustomize-dir` contains. It fails the job if the API is
+unreachable, the token is rejected, the namespace is missing, or any verb is
+denied. A deploy that cannot reach or change the cluster therefore
 fails red instead of reporting a green run that changed nothing.
 
 The runner pool must provide:
@@ -145,7 +148,8 @@ The runner pool must provide:
   what the deploy touches (secrets, services, serviceaccounts, deployments,
   replicasets, pods, pods/log, events, plus jobs when `run-migrate` and pods
   create/delete when `smoke-pod-name`), and get/patch on that one Namespace
-  object (a ClusterRole with `resourceNames`).
+  object (a ClusterRole with `resourceNames`). The Namespace must already
+  exist; in-cluster mode does not create it.
 - `kubectl` on PATH in the runner image (the stock runner image lacks it),
   plus `aws` when `seed-app-secrets` is on.
 - A Docker daemon for the build (for example a dind sidecar) and a network
