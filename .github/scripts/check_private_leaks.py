@@ -198,12 +198,9 @@ def repo_ref_pattern(allowed: list[str]) -> str:
     hyphenated word followed by THIS repo's issue number, not a repo reference,
     and that shape was 91 of the first 99 hits when the rule was first written.
     """
-    # An ALL-CAPS name is a key prefix (`USER#1`, `INST#42`, `PR#734`), not a
-    # repo: GitHub refs are written in lower or mixed case. `(?-i:...)` holds
-    # this one check case-sensitive inside the case-insensitive rule.
-    exempt = r"(?!(?-i:[A-Z][A-Z0-9_]*#))"
+    exempt = ""
     if allowed:
-        exempt += "(?!(?:%s)\\b)" % "|".join(re.escape(a) for a in sorted(allowed))
+        exempt = "(?!(?:%s)\\b)" % "|".join(re.escape(a) for a in sorted(allowed))
     return (
         r"(?<![\w/-])"  # not mid-word, not the tail of a path
         r"(?:[a-z0-9][a-z0-9._-]*/)?"  # optional owner/ prefix

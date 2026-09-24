@@ -175,17 +175,19 @@ class CrossRepoRefs(unittest.TestCase):
         # the owner too.
         self.assertIn("private-issue-ref", hits("see someone/someplace#12")[0])  # leak-guard-allow: fixture
 
-    def test_all_caps_key_prefix_is_not_a_repo(self):
-        # Sort-key prefixes (`USER#1`, `INST#42`) and "PR#734" are not repo
-        # refs. Found by the first full-tree sweep: 30+ test fixtures.
-        for text in ("pk USER#100", "sk INST#42", "see #730/PR#734", "REVIEW#7"):
-            with self.subTest(text=text):
-                self.assertEqual(hits(text), [])
-
-    def test_lower_and_mixed_case_repo_refs_are_still_caught(self):
-        for text in ("see someplace#12", "see SomePlace#12", "see some-place#12"):  # leak-guard-allow: fixture
+    def test_upper_lower_and_mixed_case_repo_refs_are_all_caught(self):
+        # No case-based exemption: an upper-case private repo name is still a
+        # private repo name. A key prefix that reads like a ref (a sort key) is
+        # exempted per caller with --allow-repo-ref, deliberately and visibly.
+        for text in ("see someplace#12", "see SomePlace#12", "see PRIVATE#123",  # leak-guard-allow: fixture
+                     "see OWNER/PRIVATE#123"):  # leak-guard-allow: fixture
             with self.subTest(text=text):
                 self.assertIn("private-issue-ref", hits(text)[0])
+
+    def test_key_prefix_is_exempt_only_when_allow_listed(self):
+        rules = build_patterns(["infra-public", "USER"])
+        self.assertEqual(hits("pk USER#100", rules=rules), [])  # leak-guard-allow: fixture
+        self.assertIn("private-issue-ref", hits("pk USER#100")[0])  # leak-guard-allow: fixture
 
     def test_bare_issue_number_is_clean(self):
         self.assertEqual(hits("closes #123"), [])
