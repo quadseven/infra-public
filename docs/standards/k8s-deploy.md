@@ -155,6 +155,16 @@ The runner pool must provide:
 - A Docker daemon for the build (for example a dind sidecar) and a network
   path from the pod to `registry-host`.
 
+The preflight is deliberately stricter than a single apply needs: it asks for
+get, create and patch on every rendered type even when the object already
+exists, so the same identity works for a first install and every later deploy.
+
+Trust boundary: the ServiceAccount token is mounted into the runner pod, so
+every job that runs on that pool (including `prebuild-run`, the image build,
+and any CI job sharing the pool) can read it. Give the pool to one trusted
+repository, keep the Role scoped to the target namespace, and do not run
+untrusted pull-request code on a pool that carries a deploy identity.
+
 ## Cluster invariants the manifests must hold
 
 - **Image placeholders.** Deployment/Job `*.yaml` in `kustomize-dir` carry
