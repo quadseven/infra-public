@@ -69,6 +69,23 @@ deliberate differences, all needed to make one script serve every repo:
   3. Two shapes were added for AGENTS.md bullets that had no pattern at all: a
      local user path (`/Users/<name>`) and a MAC address. Both measured zero
      hits across this repo's full history before being added.
+
+Layer 2 (the deny-list) follows grug's semantics exactly, because the one real
+deny-list in the estate is written in grug's format and a consumer pointed at
+it must read it the same way:
+
+  - ONE TERM PER LINE, blank lines and `#` comments dropped. Whitespace
+    splitting would turn a full name into two unrelated single-word rules, and
+    would turn every word of a `# comment` line into a rule that fires on
+    ordinary prose.
+  - Anchored on word-ish boundaries where the term's own edge is
+    alphanumeric, so a short first name does not fire inside an ordinary word,
+    while a path or domain fragment still matches mid-path.
+  - A deny-list hit is NEVER echoed. The findings print to a PUBLIC Actions
+    log; echoing the matched text would republish the protected term there and
+    label it as protected. Only its length and line number are shown.
+  - Every run prints how many shape patterns and deny-list terms it loaded, so
+    "clean" always says whether the half that matches people was on.
 """
 
 from __future__ import annotations
@@ -197,6 +214,42 @@ def build_patterns(
     return rules
 
 
+DENY = "deny-list"  # rule name for layer-2 hits; scan() redacts these
+
+
+def parse_deny_list(raw: str) -> list[str]:
+    """One term per line; blanks and #-comments dropped; case-insensitive dedup.
+
+    Line-based, NOT whitespace-split: a full name is one term, and splitting it
+    would silently turn "Ada Lovelace" into two unrelated single-word rules.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+    for line in raw.splitlines():
+        term = line.strip()
+        if not term or term.startswith("#"):
+            continue
+        if term.lower() in seen:
+            continue
+        seen.add(term.lower())
+        terms.append(term)
+    return terms
+
+
+def deny_rule(term: str) -> re.Pattern[str]:
+    """A denied term, anchored on word-ish boundaries.
+
+    Plain substring matching is unusable for people: a four-letter first name
+    is a substring of ordinary English words (`ada` sits inside `canada`), and
+    a guard that fires on prose gets bypassed within a day. The boundary is
+    applied only where the term's own edge is alphanumeric, so a path prefix or
+    a domain suffix still matches mid-path and mid-hostname.
+    """
+    lead = r"(?<![0-9A-Za-z_])" if (term[0].isalnum() or term[0] == "_") else ""
+    trail = r"(?![0-9A-Za-z_])" if (term[-1].isalnum() or term[-1] == "_") else ""
+    return re.compile(lead + re.escape(term) + trail, re.I)
+
+
 def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
     """Specific names that have no generic shape (products, people, projects).
 
@@ -205,23 +258,33 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
     would mean the guard quietly stops covering the exact terms someone
     deliberately added to it, which is indistinguishable from a green run.
     """
-    out = subprocess.run(
-        [
-            "aws",
-            "ssm",
-            "get-parameter",
-            "--name",
-            param,
-            "--with-decryption",
-            "--query",
-            "Parameter.Value",
-            "--output",
-            "text",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            [
+                "aws",
+                "ssm",
+                "get-parameter",
+                "--name",
+                param,
+                "--with-decryption",
+                "--query",
+                "Parameter.Value",
+                "--output",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        # No `aws` on PATH. Without this the interpreter dies with a traceback
+        # and exit 1 - which the exit-code contract reads as "a leak was
+        # found", and which warn mode would then soften to green.
+        print(
+            f"FATAL: cannot run the AWS CLI to read deny-list {param}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
     if out.returncode != 0:
         print(
             f"FATAL: could not read deny-list from SSM {param}: "
@@ -229,7 +292,7 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    terms = [t.strip() for t in out.stdout.split() if t.strip()]
+    terms = parse_deny_list(out.stdout)
     if not terms:
         # An empty parameter is not "no terms to check", it is a deny-list layer
         # that was asked for and did not arrive - a typo'd path, a wiped value,
@@ -240,10 +303,7 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    return [
-        ("deny-list", re.compile(re.escape(t), re.I), "an explicitly denied term")
-        for t in terms
-    ]
+    return [(DENY, deny_rule(t), "an explicitly denied term") for t in terms]
 
 
 def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
@@ -270,7 +330,16 @@ def scan(text: str, rules, *, label: str, diff_mode: bool = False) -> list[str]:
         for name, rx, why in rules:
             m = rx.search(payload)
             if m:
-                hits.append(f"  {label}:{lineno}  [{name}] {m.group(0)!r} - {why}")
+                # A layer-2 hit is NEVER echoed: this prints to a PUBLIC
+                # Actions log, and echoing the match would republish the very
+                # term the deny-list exists to keep out. The line number is
+                # enough - the author is looking at their own diff or text.
+                shown = (
+                    f"<redacted, {len(m.group(0))} chars>"
+                    if name == DENY
+                    else repr(m.group(0))
+                )
+                hits.append(f"  {label}:{lineno}  [{name}] {shown} - {why}")
                 break
     return hits
 
@@ -325,8 +394,21 @@ def main() -> int:
     args = ap.parse_args()
 
     rules = build_patterns(args.allow_repo_ref)
+    n_shapes = len(rules)
+    n_deny = 0
     if args.deny_list_ssm:
-        rules += load_ssm_deny_list(args.deny_list_ssm)
+        deny = load_ssm_deny_list(args.deny_list_ssm)
+        n_deny = len(deny)
+        rules += deny
+    # Say what is loaded on EVERY run, pass or fail. grug's guard printed
+    # "clean" for months while its people-matching half was never switched
+    # on, and nothing in the output said so.
+    coverage = (
+        f"{n_shapes} shape patterns, {n_deny} deny-list terms"
+        if args.deny_list_ssm
+        else f"{n_shapes} shape patterns, deny-list not configured "
+        "(names and products are not being checked)"
+    )
 
     if args.staged:
         text = git_diff(["--cached"])
@@ -354,12 +436,13 @@ def main() -> int:
 
     hits = scan(text, rules, label=label, diff_mode=args.staged or bool(args.diff))
     if not hits:
-        print(
-            f"leak guard: clean ({len(rules)} patterns, {len(text.splitlines())} lines scanned)"
-        )
+        print(f"leak guard: clean ({coverage}, {len(text.splitlines())} lines scanned)")
         return 0
 
-    print("BLOCKED: private infrastructure identifiers found\n", file=sys.stderr)
+    print(
+        f"BLOCKED: private infrastructure identifiers found ({coverage})\n",
+        file=sys.stderr,
+    )
     for h in hits:
         print(h, file=sys.stderr)
     print(
@@ -368,6 +451,9 @@ def main() -> int:
         "infrastructure and people even when they contain no secret. Describe the\n"
         "shape instead: 'an arm64 node', 'the infrastructure repo', 'a tailnet\n"
         "host'. See templates/public-repo/AGENTS.md for the full rule.\n"
+        "\nA [deny-list] hit is a term with no generic shape - a person, a\n"
+        "product, a host codename - and its text is deliberately NOT echoed\n"
+        "here. Open the line above in your own diff to see it.\n"
         "\nIf a hit is genuinely fine, add the marker 'leak-guard-allow' to that\n"
         "line - deliberately noisy, so the exemption is visible in review.",
         file=sys.stderr,
