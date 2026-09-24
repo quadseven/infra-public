@@ -352,17 +352,19 @@ jobs:
           # non-zero on "no" AND on any API error, so each line fails closed.
           checks=(
             "patch namespaces/$NAMESPACE"
+            "get secrets"
             "create secrets"
             "patch secrets"
             "get deployments.apps"
             "watch deployments.apps"
           )
-          [[ "$RUN_MIGRATE" == "true" ]] && checks+=("create jobs.batch" "delete jobs.batch" "watch jobs.batch")
+          [[ "$RUN_MIGRATE" == "true" ]] && checks+=("get jobs.batch" "create jobs.batch" "delete jobs.batch" "watch jobs.batch")
           [[ -n "$SMOKE_POD" ]] && checks+=("create pods" "delete pods" "watch pods")
           # Every object `kubectl apply -k` will manage: render the
           # kustomization and let kubectl map each object to its resource
           # type (client dry-run: discovery only, nothing is sent). Each type
-          # needs create (first deploy) and patch (every later one). A
+          # needs get (apply reads the live object), create (first deploy)
+          # and patch (every later one). A
           # cluster-scoped object is checked by name, get + patch, since a
           # namespace-scoped identity cannot create it.
           mapfile -t objs < <(kubectl kustomize "$KUSTOMIZE_DIR" | kubectl create --dry-run=client -o name -f -)
@@ -372,7 +374,7 @@ jobs:
             if [[ "$type" == "namespace" ]]; then
               checks+=("get $o" "patch $o")
             else
-              checks+=("create $type" "patch $type")
+              checks+=("get $type" "create $type" "patch $type")
             fi
           done
           mapfile -t checks < <(printf '%s\n' "${checks[@]}" | awk '!seen[$0]++')
