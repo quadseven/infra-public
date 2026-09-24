@@ -262,6 +262,13 @@ class SsmDenyList(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+    def test_undecodable_cli_output_is_fatal_not_a_finding(self):
+        err = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch("check_private_leaks.subprocess.run", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                load_ssm_deny_list("/some/param")
+        self.assertEqual(cm.exception.code, 2)
+
 
 class DenyRuleAnchoring(unittest.TestCase):
     def test_short_name_does_not_fire_inside_a_word(self):

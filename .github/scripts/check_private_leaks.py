@@ -276,12 +276,14 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
             text=True,
             check=False,
         )
-    except OSError as exc:
-        # No `aws` on PATH. Without this the interpreter dies with a traceback
-        # and exit 1 - which the exit-code contract reads as "a leak was
-        # found", and which warn mode would then soften to green.
+    except (OSError, UnicodeDecodeError) as exc:
+        # No `aws` on PATH, or output that is not valid text. Without this the
+        # interpreter dies with a traceback and exit 1 - which the exit-code
+        # contract reads as "a leak was found", and which warn mode would
+        # then soften to green. Not errors="replace": a mangled term would
+        # silently stop matching, which is the degradation this refuses.
         print(
-            f"FATAL: cannot run the AWS CLI to read deny-list {param}: {exc}",
+            f"FATAL: cannot read deny-list {param} via the AWS CLI: {exc}",
             file=sys.stderr,
         )
         raise SystemExit(2) from exc
