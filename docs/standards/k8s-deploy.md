@@ -74,7 +74,8 @@ A frontend-bundling or shared-vendoring service adds a pre-build hook:
 | `rollout-timeout` | `180s` | `kubectl rollout status` timeout |
 | `smoke-pod-name` / `smoke-curl-cmd` | `""` | optional one-shot curl probe of the in-cluster Service |
 | `registry-pull-secret` | `registry-pull` | docker-registry imagePullSecret seeded in the namespace |
-| `tailnet-tag` | `tag:ci` | ACL tag for the ephemeral CI join |
+| `cluster-access` | `tailnet` | `tailnet`: join the tailnet + write `kubeconfig-b64`. `in-cluster`: the runner is a pod in the target cluster; use its ServiceAccount token (see below) |
+| `tailnet-tag` | `tag:ci` | ACL tag for the ephemeral CI join (`tailnet` mode only) |
 | `seed-app-secrets` | `false` | if true, OIDC -> read SSM + literals -> delete-then-create the app Secret before rollout |
 | `app-secret-name` | `""` | the Secret to seed; required when `seed-app-secrets` |
 | `ssm-secrets` | `""` | newline `KEY=/ssm/path` pairs, read with-decryption (private paths arrive here, never hardcoded) |
@@ -84,8 +85,8 @@ A frontend-bundling or shared-vendoring service adds a pre-build hook:
 | `migrate-manifest` / `migrate-job-name` | `""` | the migrate Job manifest path + name; required when `run-migrate` |
 | `migrate-timeout` | `300s` | `kubectl wait --for=condition=complete` timeout |
 
-Secrets: `registry-username`, `registry-password`, `ts-authkey`, `kubeconfig-b64`,
-and `aws-role-arn` (OIDC role for the SSM reads; passed as a secret so the
+Secrets: `registry-username`, `registry-password`, `ts-authkey` and `kubeconfig-b64`
+(both required in `tailnet` mode, omitted in `in-cluster` mode), and `aws-role-arn` (OIDC role for the SSM reads; passed as a secret so the
 account-id-bearing ARN stays masked; required when `seed-app-secrets`).
 
 A migrate/secret-seeding caller grants `id-token: write` (OIDC) in addition to
@@ -112,6 +113,43 @@ jobs:
       # ... + ...
       aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
 ```
+
+## In-cluster mode (self-hosted runner inside the target cluster)
+
+A runner that is itself a pod in the target cluster does not need the tailnet
+or a kubeconfig secret. Set `cluster-access: in-cluster`, point `runner` at
+that pool, and drop `ts-authkey` / `kubeconfig-b64` from the caller (passing
+`kubeconfig-b64` in this mode fails the job rather than being ignored):
+
+```yaml
+    with:
+      runner: <your-in-cluster-arm64-pool>
+      cluster-access: in-cluster
+      # ... the usual inputs ...
+    secrets:
+      registry-username: ${{ secrets.REGISTRY_USERNAME }}
+      registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+```
+
+The job writes a kubeconfig that points at the in-cluster API service address
+and reads the pod's projected ServiceAccount token by path (the token is never
+copied). Before the image build, a preflight runs `kubectl version`,
+`kubectl auth whoami`, and `kubectl auth can-i` for each verb the run uses,
+and fails the job if the API is unreachable, the token is rejected, or any
+verb is denied. A deploy that cannot reach or change the cluster therefore
+fails red instead of reporting a green run that changed nothing.
+
+The runner pool must provide:
+
+- `serviceAccountName` on the runner pod, with a Role in `namespace` covering
+  what the deploy touches (secrets, services, serviceaccounts, deployments,
+  replicasets, pods, pods/log, events, plus jobs when `run-migrate` and pods
+  create/delete when `smoke-pod-name`), and get/patch on that one Namespace
+  object (a ClusterRole with `resourceNames`).
+- `kubectl` on PATH in the runner image (the stock runner image lacks it),
+  plus `aws` when `seed-app-secrets` is on.
+- A Docker daemon for the build (for example a dind sidecar) and a network
+  path from the pod to `registry-host`.
 
 ## Cluster invariants the manifests must hold
 

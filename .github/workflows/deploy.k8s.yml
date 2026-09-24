@@ -35,6 +35,18 @@ name: _reusable - k8s deploy (native build -> rollout -> smoke)
 #     at runtime via env-file, never echoed; SSM paths arrive via inputs.
 #   - run-migrate: apply a migrate Job manifest and wait for completion BEFORE
 #     rollout (e.g. alembic upgrade head), with failure log/describe dump.
+#
+# Cluster access (`cluster-access` input):
+#   - tailnet (default): ephemeral tailnet join + the kubeconfig-b64 secret.
+#     Unchanged behavior for every existing caller.
+#   - in-cluster: for a self-hosted runner that runs as a pod INSIDE the
+#     target cluster. No tailnet join and no kubeconfig secret: kubectl uses
+#     the runner pod's projected ServiceAccount token against the in-cluster
+#     API endpoint. A preflight proves the API answers and the token is
+#     authorized for the verbs this deploy uses, and fails the job otherwise,
+#     so an unreachable or unauthorized cluster can never read as a green
+#     deploy that changed nothing. The runner pod's ServiceAccount needs the
+#     matching RBAC in `namespace` (and get/patch on that Namespace object).
 
 on:
   workflow_call:
@@ -113,8 +125,18 @@ on:
         required: false
         type: string
         default: "registry-pull"
+      cluster-access:
+        description: |
+          How the job reaches the cluster API.
+          "tailnet" (default): join the tailnet with ts-authkey and write kubeconfig-b64.
+          "in-cluster": the runner is a pod in the target cluster; skip both and use the
+          pod's ServiceAccount token. A preflight fails the job if the API is unreachable
+          or the token lacks the RBAC this deploy needs.
+        required: false
+        type: string
+        default: "tailnet"
       tailnet-tag:
-        description: "Tailscale ACL tag for the ephemeral CI join."
+        description: "Tailscale ACL tag for the ephemeral CI join (cluster-access: tailnet only)."
         required: false
         type: string
         default: "tag:ci"
@@ -186,11 +208,11 @@ on:
         description: "Registry password/token."
         required: true
       ts-authkey:
-        description: "Tailscale ephemeral auth key for the CI tailnet join."
-        required: true
+        description: "Tailscale ephemeral auth key for the CI tailnet join. Required when cluster-access is tailnet (the default); unused in-cluster."
+        required: false
       kubeconfig-b64:
-        description: "base64-encoded kubeconfig for the target cluster."
-        required: true
+        description: "base64-encoded kubeconfig for the target cluster. Required when cluster-access is tailnet (the default); unused in-cluster."
+        required: false
       aws-role-arn:
         description: "IAM role ARN to assume (OIDC) for the SSM reads. Passed as a secret so the account-id-bearing ARN stays masked in logs. Required when seed-app-secrets is true."
         required: false
@@ -219,9 +241,28 @@ jobs:
       - name: Preflight - required inputs present
         env:
           REGISTRY_HOST: ${{ inputs.registry-host }}
+          CLUSTER_ACCESS: ${{ inputs.cluster-access }}
+          HAS_TS_AUTHKEY: ${{ secrets.ts-authkey != '' }}
+          HAS_KUBECONFIG: ${{ secrets.kubeconfig-b64 != '' }}
         run: |
           set -euo pipefail
           [[ -n "$REGISTRY_HOST" ]] || { echo "::error::registry-host is empty (pass vars.DEPLOY_REGISTRY_HOST)"; exit 1; }
+          case "$CLUSTER_ACCESS" in
+            tailnet)
+              # These secrets were `required: true` before in-cluster mode
+              # existed; keep that contract for the default mode.
+              [[ "$HAS_TS_AUTHKEY" == "true" ]] || { echo "::error::cluster-access is tailnet but the ts-authkey secret is empty"; exit 1; }
+              [[ "$HAS_KUBECONFIG" == "true" ]] || { echo "::error::cluster-access is tailnet but the kubeconfig-b64 secret is empty"; exit 1; }
+              ;;
+            in-cluster)
+              # A kubeconfig secret passed alongside in-cluster mode would be
+              # silently ignored; refuse the ambiguity instead.
+              [[ "$HAS_KUBECONFIG" == "false" ]] || { echo "::error::cluster-access is in-cluster but a kubeconfig-b64 secret was passed; drop it from the caller"; exit 1; }
+              ;;
+            *)
+              echo "::error::cluster-access must be 'tailnet' or 'in-cluster', got '$CLUSTER_ACCESS'"; exit 1
+              ;;
+          esac
 
       - name: Setup Node
         if: inputs.node-version != ''
@@ -238,11 +279,93 @@ jobs:
           bash -euo pipefail -c "$PREBUILD_RUN"
 
       - name: Join tailnet (ephemeral)
+        if: inputs.cluster-access == 'tailnet'
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
           authkey: ${{ secrets.ts-authkey }}
           tags: ${{ inputs.tailnet-tag }}
           use-cache: 'true'
+
+      - name: In-cluster kubeconfig + API preflight
+        if: inputs.cluster-access == 'in-cluster'
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          RUN_MIGRATE: ${{ inputs.run-migrate }}
+          SMOKE_POD: ${{ inputs.smoke-pod-name }}
+        run: |
+          set -euo pipefail
+          SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+          command -v kubectl >/dev/null || { echo "::error::kubectl is not on PATH in this runner image; in-cluster mode needs it baked into the image"; exit 1; }
+          [[ -n "${KUBERNETES_SERVICE_HOST:-}" && -n "${KUBERNETES_SERVICE_PORT:-}" ]] \
+            || { echo "::error::KUBERNETES_SERVICE_HOST/PORT unset: this runner is not a pod in a cluster, so in-cluster mode cannot work"; exit 1; }
+          [[ -s "$SA_DIR/token" && -s "$SA_DIR/ca.crt" ]] \
+            || { echo "::error::no ServiceAccount token at $SA_DIR (automountServiceAccountToken off, or no serviceAccountName on the runner pod)"; exit 1; }
+          HOST="$KUBERNETES_SERVICE_HOST"
+          [[ "$HOST" == *:* ]] && HOST="[$HOST]"   # IPv6 service address
+          # Runs BEFORE the image build so a dead or unauthorized cluster fails
+          # in seconds, not after a full build + push.
+          # Explicit kubeconfig (not kubectl's implicit in-cluster fallback) so
+          # a stray config or KUBECONFIG on the runner cannot redirect the
+          # deploy. It holds only file PATHS: tokenFile is re-read per request,
+          # so the projected token's rotation is picked up and no credential is
+          # copied to disk.
+          install -m 700 -d "$HOME/.kube"
+          install -m 600 /dev/null "$HOME/.kube/config"
+          cat > "$HOME/.kube/config" <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: in-cluster
+              cluster:
+                server: https://${HOST}:${KUBERNETES_SERVICE_PORT}
+                certificate-authority: ${SA_DIR}/ca.crt
+          users:
+            - name: in-cluster
+              user:
+                tokenFile: ${SA_DIR}/token
+          contexts:
+            - name: in-cluster
+              context:
+                cluster: in-cluster
+                user: in-cluster
+                namespace: ${NAMESPACE}
+          current-context: in-cluster
+          EOF
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          export KUBECONFIG="$HOME/.kube/config"
+
+          # Reachability: /version answers without RBAC, so a failure here is
+          # the network or TLS, not permissions.
+          kubectl version --request-timeout=20s \
+            || { echo "::error::cluster API at the in-cluster service address is unreachable from this runner"; exit 1; }
+          # Authentication: whoami needs a token the API accepts.
+          kubectl auth whoami --request-timeout=20s \
+            || { echo "::error::cluster API rejected the runner's ServiceAccount token (unauthorized)"; exit 1; }
+
+          # Authorization: every verb this run will use. `auth can-i` exits
+          # non-zero on "no" AND on any API error, so each line fails closed.
+          checks=(
+            "get namespaces/$NAMESPACE"
+            "patch namespaces/$NAMESPACE"
+            "create secrets"
+            "patch secrets"
+            "patch deployments.apps"
+            "get deployments.apps"
+            "watch deployments.apps"
+          )
+          [[ "$RUN_MIGRATE" == "true" ]] && checks+=("create jobs.batch" "delete jobs.batch" "watch jobs.batch")
+          [[ -n "$SMOKE_POD" ]] && checks+=("create pods" "delete pods" "watch pods")
+          denied=0
+          for c in "${checks[@]}"; do
+            # shellcheck disable=SC2086  # intentional split: "<verb> <resource>"
+            if ans="$(kubectl auth can-i $c -n "$NAMESPACE" --request-timeout=20s 2>&1)"; then
+              echo "can-i $c: yes"
+            else
+              echo "::error::runner ServiceAccount cannot '$c' in namespace $NAMESPACE ($ans)"
+              denied=1
+            fi
+          done
+          [[ "$denied" == "0" ]] || { echo "::error::in-cluster RBAC preflight failed; grant the runner ServiceAccount the verbs above"; exit 1; }
 
       - name: Registry login
         env:
@@ -275,6 +398,7 @@ jobs:
           docker push "$REGISTRY_HOST/$IMAGE_REPO:${GITHUB_SHA}"
 
       - name: Write kubeconfig
+        if: inputs.cluster-access == 'tailnet'
         env:
           KUBECONFIG_B64: ${{ secrets.kubeconfig-b64 }}
         run: |
