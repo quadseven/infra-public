@@ -350,6 +350,8 @@ def scan(
         if diff_mode:
             if line.startswith(("---", "+++")):
                 continue  # file headers carry paths, not content
+            if line.startswith("@@"):
+                continue  # hunk headers carry pre-image context, not added content
             if line.startswith("-"):
                 continue  # a removal is a scrub; never block it
             if line.startswith(("rename from ", "copy from ")):
