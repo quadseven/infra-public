@@ -242,6 +242,26 @@ class DiffSemantics(unittest.TestCase):
         self.assertEqual(len(found), 2, found)
         self.assertTrue(all("server-hostname" in h for h in found))
 
+    def test_hunk_header_with_private_ip_is_skipped(self):
+        # Hunk headers in diff mode carry line numbers and pre-image context,
+        # never added content. If a removed line had a leak, the hunk header
+        # repeats it. The leak is already gone; the header must not block the scrub.
+        clean = "@@ -153 +153 @@ OLLAMA_URL = http://192.168.4.5:11434\n+new clean line\n"  # leak-guard-allow: fixture
+        self.assertEqual(hits(clean, diff_mode=True), [])
+        leaking = "@@ -153 +153 @@ OLLAMA_URL = http://192.168.4.5:11434\n+OLLAMA_URL = http://192.168.4.5:11434\n"  # leak-guard-allow: fixture
+        found = hits(leaking, diff_mode=True)
+        self.assertEqual(len(found), 1)
+        self.assertIn("rfc1918-ip", found[0])
+
+    def test_hunk_header_repeats_removed_leak_then_clean_plus_line_no_hit(self):
+        # Two consecutive removals cause the second hunk header to repeat the
+        # first removed line. The scrub itself must not trip the guard.
+        text = ("@@ -10,7 +10,6 @@\n"
+                "-the old host was 10.1.2.3 here\n"  # leak-guard-allow: fixture
+                "-another removed line\n"
+                "+completely clean addition\n")
+        self.assertEqual(hits(text, diff_mode=True), [])
+
     def test_markdown_bullet_is_scanned_in_text_mode(self):
         # The same leading `-` that means "removal" in a diff means "bullet" in
         # a PR body, and most of the leaks this guard exists for were prose.
