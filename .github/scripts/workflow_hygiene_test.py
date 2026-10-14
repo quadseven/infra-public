@@ -35,6 +35,21 @@ from workflow_hygiene import (
 DUMMY = Path("workflows/dummy.yml")
 
 
+class DocsSyncLeakScan(unittest.TestCase):
+    def test_sync_diff_is_scanned_before_push(self):
+        workflow = Path(__file__).parents[1] / "workflows/sync.public-repo-docs.yml"
+        text = workflow.read_text()
+        scan_start = text.index("      - name: Scan sync diff and PR text")
+        push = text.index("git push -f origin", scan_start)
+        scan_step = text[scan_start:push]
+        self.assertIn("check_private_leaks.py", scan_step)
+        self.assertIn("--diff", scan_step)
+        self.assertIn("--text-file ../pr-text.txt", scan_step)
+        prepare_start = text.index("      - name: Prepare sync commit and PR text")
+        self.assertIn("cat ../pr-title.txt ../pr-body.txt > ../pr-text.txt", text[prepare_start:scan_start])
+        self.assertLess(scan_start, push)
+
+
 class ShaPinning(unittest.TestCase):
     def _lint(self, text: str) -> list[str]:
         # lint_file() takes a path (it reads the file itself), so exercise

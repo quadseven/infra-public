@@ -127,29 +127,37 @@ jobs:
           done
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
-      - name: Open sync PR
+      - name: Fetch leak scanner
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          ref: main
+          sparse-checkout: .github/scripts/check_private_leaks.py
+          sparse-checkout-cone-mode: false
+          path: scanner
+          persist-credentials: false
+
+      - name: Prepare sync commit and PR text
         if: steps.diff.outputs.changed == 'true'
         working-directory: target
         env:
-          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ inputs.branch }}
-          LABEL: ${{ inputs.pr_label }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add AGENTS.md CLAUDE.md
           if git diff --cached --quiet; then
             echo "nothing staged after add - already in sync"
             exit 0
           fi
-
           git checkout -B "$BRANCH"
           git commit -m "chore: sync AGENTS.md/CLAUDE.md from infra-public canonical copy"
-          git push -f origin "$BRANCH"
-
-          body=$(cat <<'EOF'
+          cat > ../pr-title.txt <<'EOF'
+          chore: sync AGENTS.md/CLAUDE.md from infra-public
+          EOF
+          cat > ../pr-body.txt <<'EOF'
           ## Why
 
           This repo's AGENTS.md/CLAUDE.md have drifted from the canonical
@@ -181,7 +189,34 @@ jobs:
 
           Size: XS
           EOF
-          )
+          cat ../pr-title.txt ../pr-body.txt > ../pr-text.txt
+
+      - name: Scan sync diff and PR text
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: target
+        env:
+          SCANNER: ${{ github.workspace }}/scanner/.github/scripts/check_private_leaks.py
+          BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$SCANNER" ]; then
+            echo "::error::the leak scanner was not fetched; refusing to publish the sync PR"
+            exit 1
+          fi
+          python3 "$SCANNER" --diff "$BASE_REF...HEAD" --text-file ../pr-text.txt
+
+      - name: Open sync PR
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+          LABEL: ${{ inputs.pr_label }}
+        run: |
+          set -euo pipefail
+          title=$(cat ../pr-title.txt)
+          body=$(cat ../pr-body.txt)
+          git push -f origin "$BRANCH"
 
           existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)
           if [[ -n "$existing" && "$existing" != "null" ]]; then
@@ -189,9 +224,9 @@ jobs:
             exit 0
           fi
 
-          if ! gh pr create --title "chore: sync AGENTS.md/CLAUDE.md from infra-public" \
+          if ! gh pr create --title "$title" \
               --body "$body" --head "$BRANCH" --label "$LABEL"; then
             echo "retrying PR create without --label (label may not exist in this repo)" >&2
-            gh pr create --title "chore: sync AGENTS.md/CLAUDE.md from infra-public" \
+            gh pr create --title "$title" \
               --body "$body" --head "$BRANCH"
           fi
