@@ -243,11 +243,15 @@ class DiffSemantics(unittest.TestCase):
         self.assertTrue(all("server-hostname" in h for h in found))
 
     def test_hunk_header_with_private_ip_is_skipped(self):
-        # Hunk headers in diff mode carry pre-image context. If a removed line
-        # had a leak, the hunk header repeats it. The leak is already gone; the
-        # header must not block the scrub.
-        text = "@@ -153 +153 @@ OLLAMA_URL = http://192.168.4.5:11434\n+new clean line\n"
-        self.assertEqual(hits(text, diff_mode=True), [])
+        # Hunk headers in diff mode carry line numbers and pre-image context,
+        # never added content. If a removed line had a leak, the hunk header
+        # repeats it. The leak is already gone; the header must not block the scrub.
+        clean = "@@ -153 +153 @@ OLLAMA_URL = http://192.168.4.5:11434\n+new clean line\n"  # leak-guard-allow: fixture
+        self.assertEqual(hits(clean, diff_mode=True), [])
+        leaking = "@@ -153 +153 @@ OLLAMA_URL = http://192.168.4.5:11434\n+OLLAMA_URL = http://192.168.4.5:11434\n"  # leak-guard-allow: fixture
+        found = hits(leaking, diff_mode=True)
+        self.assertEqual(len(found), 1)
+        self.assertIn("rfc1918-ip", found[0])
 
     def test_hunk_header_repeats_removed_leak_then_clean_plus_line_no_hit(self):
         # Two consecutive removals cause the second hunk header to repeat the
