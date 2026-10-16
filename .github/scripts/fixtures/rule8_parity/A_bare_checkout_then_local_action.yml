@@ -1,0 +1,7 @@
+# canonical-rule8-lines: 7
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git checkout state
+      - uses: ./.github/actions/notify

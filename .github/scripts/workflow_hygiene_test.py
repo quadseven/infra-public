@@ -16,7 +16,9 @@ Run: python3 .github/scripts/workflow_hygiene_test.py
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
 import re
 import sys
@@ -25,11 +27,17 @@ import unittest
 from pathlib import Path
 
 from workflow_hygiene import (
+    SKIPPED_RULES,
+    lint_branch_switch_local_action,
     lint_curl_timeouts,
     lint_file,
+    lint_gh_on_arc,
     lint_job_timeouts,
+    lint_pin_labels,
     lint_shell_script,
     lint_template_injection,
+    main,
+    skipped_rules_label,
 )
 
 DUMMY = Path("workflows/dummy.yml")
@@ -401,20 +409,25 @@ class CurlOutsideRunBlocks(unittest.TestCase):
 # pointing at its workflow_hygiene.py, the last test re-derives them live, so
 # a stale recording is caught too.
 
-PARITY_DIR = Path(__file__).parent / "fixtures" / "rule5_parity"
-PARITY_VERDICT_RE = re.compile(r"^# canonical-rule5-lines:\s*(.+?)\s*$", re.MULTILINE)
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+PARITY_DIR = FIXTURES_DIR / "rule5_parity"
 # Bumped by hand when a case is added: a corpus that silently loads zero
 # cases must fail, never read as clean.
 PARITY_CASE_COUNT = 21
 
 
-def _parity_cases() -> list[tuple[str, str, tuple[int, ...]]]:
+def _parity_cases(
+    rule: int = 5,
+) -> list[tuple[str, str, tuple[int, ...]]]:
+    verdict_re = re.compile(
+        rf"^# canonical-rule{rule}-lines:\s*(.+?)\s*$", re.MULTILINE
+    )
     cases = []
-    for p in sorted(PARITY_DIR.iterdir()):
+    for p in sorted((FIXTURES_DIR / f"rule{rule}_parity").iterdir()):
         text = p.read_text()
-        m = PARITY_VERDICT_RE.search(text)
+        m = verdict_re.search(text)
         if not m:
-            raise ValueError(f"{p.name}: no `# canonical-rule5-lines:` header")
+            raise ValueError(f"{p.name}: no `# canonical-rule{rule}-lines:` header")
         verdict = m.group(1)
         expected = (
             () if verdict == "none" else tuple(int(x) for x in verdict.split(","))
@@ -473,6 +486,142 @@ class Rule5Parity(unittest.TestCase):
             file=sys.stderr,
         )
         self.assertEqual(drift, [], "\n".join(drift))
+
+
+def _load_canonical():
+    linter = os.environ.get("CANONICAL_HYGIENE_LINTER")
+    if not linter:
+        return None
+    spec = importlib.util.spec_from_file_location("canonical_hygiene", linter)
+    assert spec and spec.loader, linter
+    canon = importlib.util.module_from_spec(spec)
+    sys.modules["canonical_hygiene"] = canon
+    spec.loader.exec_module(canon)
+    return canon
+
+
+def _lint_pin_labels_lines(lint, name: str, text: str) -> tuple[int, ...]:
+    """Rule 11 reports by pin, not by line, and reads files from disk: write
+    the case out and collect every `name:LINE` site the errors name."""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / name
+        path.write_text(text)
+        errors, _ = lint([path])
+    sites = re.findall(re.escape(str(path)) + r":(\d+)", "\n".join(errors))
+    return tuple(sorted({int(s) for s in sites}))
+
+
+RULE_LINTERS = {
+    8: lambda name, text, m: _flagged_lines(
+        m.lint_branch_switch_local_action(Path(name), text)
+    ),
+    11: lambda name, text, m: _lint_pin_labels_lines(m.lint_pin_labels, name, text),
+    12: lambda name, text, m: _flagged_lines(m.lint_gh_on_arc(Path(name), text)),
+}
+# Bumped by hand when a case is added, for the same reason as rule 5's.
+NEW_RULE_CASE_COUNTS = {8: 8, 11: 7, 12: 8}
+
+
+class NewRuleParity(unittest.TestCase):
+    """Rules 8, 11 and 12 against the canonical linter's recorded verdicts."""
+
+    def test_every_corpus_loads_its_cases_and_flags_something(self):
+        for rule, count in NEW_RULE_CASE_COUNTS.items():
+            with self.subTest(rule=rule):
+                cases = _parity_cases(rule)
+                self.assertEqual(len(cases), count)
+                self.assertTrue(
+                    any(expected for _, _, expected in cases),
+                    f"rule {rule} corpus has no violating case",
+                )
+
+    def test_the_port_matches_the_recorded_canonical_verdicts(self):
+        this = sys.modules["workflow_hygiene"]
+        for rule, lint in RULE_LINTERS.items():
+            drift = [
+                f"{name}: port flags {list(got)}, canonical flags {list(expected)}"
+                for name, text, expected in _parity_cases(rule)
+                if (got := lint(name, text, this)) != expected
+            ]
+            self.assertEqual(drift, [], f"rule {rule}:\n" + "\n".join(drift))
+
+    def test_the_recorded_verdicts_match_the_live_canonical_linter(self):
+        canon = _load_canonical()
+        if canon is None:
+            self.skipTest("CANONICAL_HYGIENE_LINTER unset - recorded verdicts stand in")
+        for rule, lint in RULE_LINTERS.items():
+            drift = [
+                f"{name}: recorded {list(expected)}, canonical now {list(live)}"
+                for name, text, expected in _parity_cases(rule)
+                if (live := lint(name, text, canon)) != expected
+            ]
+            self.assertEqual(drift, [], f"rule {rule}:\n" + "\n".join(drift))
+
+
+class SkippedRules(unittest.TestCase):
+    def test_rules_3_4_and_10_are_declared_skipped_with_a_reason(self):
+        self.assertEqual(sorted(SKIPPED_RULES), [3, 4, 10])
+        self.assertTrue(all(SKIPPED_RULES.values()))
+
+    def test_label_names_them_as_the_canonical_linter_does(self):
+        self.assertEqual(skipped_rules_label(), "rules 3, 4 and 10 skipped")
+
+    def test_runtime_output_names_the_skipped_rules(self):
+        out = io.StringIO()
+        before = Path.cwd()
+        os.chdir(Path(__file__).parents[2])
+        try:
+            with contextlib.redirect_stdout(out):
+                code = main()
+        finally:
+            os.chdir(before)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("rules 3, 4 and 10 skipped", out.getvalue())
+
+
+class BranchSwitchAndGhAndPinLabels(unittest.TestCase):
+    def test_rule_8_names_the_local_action_line(self):
+        text = "steps:\n  - run: git checkout state\n  - uses: ./.github/actions/x\n"
+        errors = lint_branch_switch_local_action(DUMMY, text)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(":3:", errors[0])
+
+    def test_rule_12_names_the_gh_line(self):
+        text = "jobs:\n  j:\n    runs-on: arc-x\n    steps:\n      - run: gh pr list\n"
+        errors = lint_gh_on_arc(DUMMY, text)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(":5:", errors[0])
+
+    def test_rule_11_names_the_conflicting_labels(self):
+        sha = "a" * 40
+        text = f"      - uses: o/a@{sha}  # v5\n      - uses: o/a@{sha}  # v4\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "w.yml"
+            path.write_text(text)
+            errors, summary = lint_pin_labels([path])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("2 version labels", errors[0])
+        self.assertIn("1 with conflicting labels", summary)
+
+    def test_lint_file_wires_rules_8_and_12_for_workflows(self):
+        text = (
+            "jobs:\n  j:\n    runs-on: arc-x\n    timeout-minutes: 5\n    steps:\n"
+            "      - run: git checkout state\n      - run: gh pr list\n"
+            "      - uses: ./.github/actions/x\n"
+        )
+        before = Path.cwd()
+        with tempfile.TemporaryDirectory() as d:
+            wf = Path(d) / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            (wf / "w.yml").write_text(text)
+            os.chdir(d)
+            try:
+                errors = lint_file(Path(".github/workflows/w.yml"))
+            finally:
+                os.chdir(before)
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("local action" in e for e in errors))
+        self.assertTrue(any("`gh` in job" in e for e in errors))
 
 
 class TemplateInjection(unittest.TestCase):

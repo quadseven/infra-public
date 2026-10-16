@@ -1,0 +1,10 @@
+# canonical-rule12-lines: 10
+jobs:
+  quiet:
+    runs-on: arc-example
+    steps:
+      - run: echo ok
+  report:
+    runs-on: arc-example
+    steps:
+      - run: gh run list

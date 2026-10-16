@@ -1,0 +1,7 @@
+# canonical-rule12-lines: none
+jobs:
+  report:
+    runs-on: arc-example
+    steps:
+      - run: |
+          echo hi  # gh issue list is unavailable here

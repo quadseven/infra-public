@@ -1,0 +1,7 @@
+# canonical-rule8-lines: none
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git checkout state -- data/versions.json
+      - uses: ./.github/actions/notify

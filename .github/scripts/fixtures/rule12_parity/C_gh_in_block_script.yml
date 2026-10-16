@@ -1,0 +1,8 @@
+# canonical-rule12-lines: 8
+jobs:
+  report:
+    runs-on: arc-example
+    steps:
+      - run: |
+          echo start
+          gh api repos/example/example
