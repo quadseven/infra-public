@@ -28,6 +28,7 @@ Run: python3 .github/scripts/validation_contract_test.py
 
 from __future__ import annotations
 
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,28 @@ class ParseContract(unittest.TestCase):
         _, errors = parse_contract("lint |  | a.yml | Step\n")
         self.assertEqual(len(errors), 1)
         self.assertIn("empty field", errors[0])
+
+    def test_shell_syntax_in_a_command_is_rejected(self):
+        # A contract command is one command, run directly - never a shell
+        # script. A line carrying `&&`, a redirect or a substitution would have
+        # to be handed to a shell to run at all, so it is refused here rather
+        # than discovered as a surprise in `--run`. `|` and `||` are absent
+        # from this list because `|` separates the fields: a command carrying
+        # one cannot reach here as a command at all.
+        for operator in ("&&", ";", ">", "<", "&", "`", "$(whoami)"):
+            with self.subTest(operator=operator):
+                text = f"lint | python3 x.py {operator} ruff check . | a.yml | Step\n"
+                entries, errors = parse_contract(text)
+                self.assertEqual(entries, [])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("shell", errors[0])
+                self.assertIn("its own line", errors[0])
+
+    def test_a_quoted_argument_is_not_shell_syntax(self):
+        text = 'lint | python3 -c "print(1)" | a.yml | Step\n'
+        entries, errors = parse_contract(text)
+        self.assertEqual(errors, [])
+        self.assertEqual(entries[0].command, 'python3 -c "print(1)"')
 
     def test_empty_contract_is_rejected(self):
         # A contract with no commands reads as "nothing to run" and would let
@@ -275,28 +298,58 @@ class RunCommands(unittest.TestCase):
         self.assertEqual(run_commands(entries, REPO_ROOT), [])
 
     def test_failing_command_is_reported_with_its_output(self):
-        entries = [
-            ContractEntry(
-                1,
-                "test",
-                "python3 -c \"print('nope'); raise SystemExit(3)\"",
-                "a.yml",
-                "S",
+        # A command is split, not handed to a shell, so the failing command is
+        # a script file - there is no `;` to chain an exit code with.
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "red.py"
+            script.write_text("print('nope')\nraise SystemExit(3)\n")
+            command = f"python3 {shlex.quote(str(script))}"
+            errors = run_commands(
+                [ContractEntry(1, "test", command, "a.yml", "S")], REPO_ROOT
             )
-        ]
-        errors = run_commands(entries, REPO_ROOT)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("exit 3", errors[0])
-        # The command's own output is what tells the lane why it went red.
-        self.assertIn("nope", errors[0])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("exit 3", errors[0])
+            # The command's own output is what tells the lane why it went red.
+            self.assertIn("nope", errors[0])
 
     def test_command_that_does_not_exist_is_reported(self):
+        # No shell means no `127`: a command that is not on PATH raises here
+        # instead of exiting, so it is reported as what it is.
         entries = [
             ContractEntry(1, "test", "definitely-not-a-command --x", "a.yml", "Step")
         ]
         errors = run_commands(entries, REPO_ROOT)
         self.assertEqual(len(errors), 1)
-        self.assertIn("exit 127", errors[0])
+        self.assertIn("no such command", errors[0])
+        self.assertIn("definitely-not-a-command", errors[0])
+
+    def test_a_quoted_argument_reaches_the_command_intact(self):
+        # The split is shell-quoting aware, so `python3 -c "print('hi')"` runs
+        # the script as one argument instead of three words.
+        entries = [
+            ContractEntry(1, "test", "python3 -c \"print('quoted')\"", "a.yml", "Step")
+        ]
+        self.assertEqual(run_commands(entries, REPO_ROOT), [])
+
+    def test_a_command_that_cannot_be_split_is_reported(self):
+        entries = [ContractEntry(1, "test", 'python3 -c "unbalanced', "a.yml", "Step")]
+        errors = run_commands(entries, REPO_ROOT)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("cannot split", errors[0])
+
+    def test_a_shell_script_is_refused_and_never_executed(self):
+        # run_commands is callable on its own, so the refusal that keeps
+        # repository text out of a shell lives here too. The marker file is the
+        # proof: without the refusal, `touch marker && true` would create it.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker"
+            entries = [
+                ContractEntry(1, "test", f"touch {marker} && true", "a.yml", "Step")
+            ]
+            errors = run_commands(entries, REPO_ROOT)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("shell syntax", errors[0])
+            self.assertFalse(marker.exists())
 
     def test_hanging_command_is_killed_and_reported(self):
         entries = [ContractEntry(1, "test", "sleep 30", "a.yml", "Step")]

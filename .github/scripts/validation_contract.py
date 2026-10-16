@@ -13,6 +13,13 @@ Adding a command to the contract makes CI execute it (see
 .github/workflows/check.loom-validation.yml), exactly as adding it to a
 workflow would. Both are review-visible changes; neither is a free note.
 
+`--run` executes a command directly - split into arguments and handed to
+execve, never to a shell. The contract is a file in the repository, and
+handing its text to a shell would turn it into a script: repository text run
+as a script, in a job that holds a token. So a command carrying shell syntax
+(`&&`, a redirect, a substitution) is refused outright, and the way to record
+a step that runs several commands is one contract line per command.
+
 Python stdlib only - the workflow parsing is regex over the YAML text, not a
 YAML load, for the same reason workflow_hygiene.py does it that way: these
 guard scripts run in CI jobs that install nothing.
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +63,10 @@ KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):\s*(.*)$")
 # of the same name cannot be mistaken for it.
 ON_HEADER_RE = re.compile(r"^on:\s*(.*)$")
 PR_TRIGGER_RE = re.compile(r"^\s{2}pull_request:\s*")
+# Shell syntax a contract command may not carry. A contract command is one
+# command, run directly; anything here is a shell script, and running one
+# means handing the text of a repository file to a shell (ruff S602).
+SHELL_OPERATOR_RE = re.compile(r"&&|\|\||[|;&<>`]|\$\(")
 OUTPUT_TAIL_LINES = 5
 OUTPUT_TAIL_CHARS = 500
 
@@ -75,6 +87,18 @@ class WorkflowStep(NamedTuple):
     name: str
     run: str
     working_directory: str
+
+
+def shell_operator(command: str) -> str | None:
+    """The first piece of shell syntax in `command`, or None if it has none.
+
+    A contract command is executed directly, never by a shell, so `&&`, a
+    pipe or a substitution in one is either a command that cannot be run or a
+    command that would not run what the step runs. Either way the lane is
+    better served by giving each of the step's commands its own line.
+    """
+    found = SHELL_OPERATOR_RE.search(command)
+    return found.group(0) if found else None
 
 
 def parse_contract(text: str) -> tuple[list[ContractEntry], list[str]]:
@@ -103,6 +127,13 @@ def parse_contract(text: str) -> tuple[list[ContractEntry], list[str]]:
         if kind not in KINDS:
             errors.append(
                 f"{lineno}: unknown kind {kind!r} (expected one of {', '.join(KINDS)}): {line}"
+            )
+            continue
+        operator = shell_operator(fields[1])
+        if operator is not None:
+            errors.append(
+                f"{lineno}: {operator!r} is shell syntax, and a contract command is one "
+                f"command run directly - give each command of that step its own line: {line}"
             )
             continue
         entries.append(ContractEntry(lineno, kind, fields[1], fields[2], fields[3]))
@@ -307,23 +338,40 @@ def run_commands(
 
 
 def _run_one(entry: ContractEntry, root: Path, timeout: int) -> list[str]:
+    where = f"{entry.workflow}:{entry.lineno}"
+    # The parser refuses a shell script, but run_commands is callable on its
+    # own, so the refusal is repeated here rather than assumed.
+    operator = shell_operator(entry.command)
+    if operator is not None:
+        return [
+            f"{where}: refusing to run {entry.command!r}: {operator!r} is shell syntax, "
+            f"and a contract command is one command run directly - give each command "
+            f"of that step its own line"
+        ]
     try:
-        done = subprocess.run(
-            entry.command,
-            shell=True,
+        argv = shlex.split(entry.command)
+    except ValueError as error:
+        return [f"{where}: cannot split {entry.command!r} into a command: {error}"]
+    try:
+        # S603 (execution of input from outside the program) is the cost of not
+        # using shell=True, and this is where the contract is meant to spend it:
+        # no shell parses the text, so `&&` cannot smuggle a second command in,
+        # and the operator guard above has already refused any line carrying it.
+        done = subprocess.run(  # noqa: S603
+            argv,
             cwd=root,
             capture_output=True,
             text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return [
-            f"{entry.workflow}:{entry.lineno}: `{entry.command}` did not finish within {timeout}s"
-        ]
+        return [f"{where}: `{entry.command}` did not finish within {timeout}s"]
+    except OSError as error:
+        return [f"{where}: no such command: {entry.command}: {error}"]
     if done.returncode == 0:
         return []
     return [
-        f"{entry.workflow}:{entry.lineno}: `{entry.command}` failed with exit "
+        f"{where}: `{entry.command}` failed with exit "
         f"{done.returncode}: {_output_tail(done)}"
     ]
 
