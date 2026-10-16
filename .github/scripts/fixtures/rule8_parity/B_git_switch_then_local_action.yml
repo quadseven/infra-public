@@ -1,0 +1,8 @@
+# canonical-rule8-lines: 8
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          git switch -c state
+      - uses: ./.github/actions/notify

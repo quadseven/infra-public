@@ -1,0 +1,8 @@
+# canonical-rule8-lines: none
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git checkout state
+      - run: git checkout "$ORIG_SHA"
+      - uses: ./.github/actions/notify
