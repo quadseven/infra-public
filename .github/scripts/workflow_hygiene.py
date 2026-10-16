@@ -412,7 +412,7 @@ GH_CALL_RE = re.compile(
     r"secret|variable|auth|gist|cache|project|attestation|extension)\b"
 )
 GH_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-gh\b")
-# An arc label, not a label that merely contains `arc-` (srv-arc-foo).
+# An arc label, not a label that merely contains `arc-` (worker-arc-example).
 ARC_IN_RUNS_ON_RE = re.compile(r"(?<![\w-])arc-[a-z0-9-]+")
 
 
