@@ -13,3 +13,11 @@
 # tests are run directly (`python3 .github/scripts/<name>_test.py`), which
 # writes __pycache__ next to the script, and a `git add -A` then stages it.
 __pycache__/
+
+# The lane runner's intent summary. The runner writes it into the worktree
+# before the commit, reads it for the pull-request body, and never commits it.
+#
+# Narrow ON PURPOSE, same reasoning as .claude/worktrees/ above: `.loom/` also
+# holds `validation.conf`, which IS meant to be committed, so this names the
+# one file rather than the directory.
+.loom/summary.md
