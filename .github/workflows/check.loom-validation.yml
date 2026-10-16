@@ -1,0 +1,48 @@
+name: check · loom validation contract
+
+# Gates .loom/validation.conf, the file that tells a lane which commands this
+# repository runs before it opens a pull request (infra-public#120). Two steps
+# on purpose: the fixture suite pins the validator itself, then `--run`
+# executes every command in the contract. A contract that names a command
+# nobody runs would send every lane through the wrong checks while the real
+# one stayed unrun, which no review of the contract file alone would catch.
+
+on:
+  pull_request:
+    paths:
+      - ".loom/validation.conf"
+      - ".github/scripts/validation_contract.py"
+      - ".github/scripts/validation_contract_test.py"
+      - ".github/workflows/**"
+      - ".github/workflows/check.loom-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".loom/validation.conf"
+
+permissions:
+  contents: read
+
+# Cancel superseded runs - only the latest commit's state matters, and there
+# is no scheduled run here to preserve.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      # The contract runs `node --test`, so the runtime is a dependency here,
+      # not a convenience. Pinned the same way as the guard that owns it.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+      - name: "Fixture suite for the contract validator"
+        run: python3 .github/scripts/validation_contract_test.py
+      - name: "Run every command in the contract"
+        run: python3 .github/scripts/validation_contract.py --run
