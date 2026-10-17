@@ -13,6 +13,6 @@ mod tests {
 
     #[test]
     fn adds() {
-        assert_eq!(add(2, 3), 6);
+        assert_eq!(add(2, 3), 5);
     }
 }
