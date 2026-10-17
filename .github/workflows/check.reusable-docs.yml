@@ -1,0 +1,39 @@
+name: check - reusable workflow docs
+
+# docs/reusables.md is generated from every reusable's workflow_call block by
+# .github/scripts/reusable_docs.py (infra-public#137). This fails a PR that
+# changes a reusable's inputs, secrets or outputs, or which PR workflows run
+# it, without regenerating the page, so the page a stranger reads cannot
+# drift from what the workflow accepts.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - "docs/reusables.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "docs/reusables.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Unit tests for the docs generator"
+        run: python3 .github/scripts/reusable_docs_test.py
+      - name: "The reusables reference is current"
+        run: python3 .github/scripts/reusable_docs.py --check
