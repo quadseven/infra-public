@@ -374,6 +374,27 @@ class RepoContract(unittest.TestCase):
         errors = check_repository(entries, REPO_ROOT)
         self.assertEqual(errors, [], "\n".join(errors))
 
+    def test_every_test_file_under_github_scripts_is_run_by_the_contract(self):
+        # infra-public#127: workflow.test.js sat beside parse.test.js for
+        # weeks while CI ran only the latter. A test file the contract does
+        # not name is a test no pull request runs.
+        entries, errors = self._contract()
+        self.assertEqual(errors, [])
+        named = {
+            arg
+            for entry in entries
+            for arg in shlex.split(entry.command)
+        }
+        scripts = REPO_ROOT / ".github" / "scripts"
+        found = sorted(
+            str(p.relative_to(REPO_ROOT))
+            for pattern in ("*_test.py", "*.test.js")
+            for p in scripts.rglob(pattern)
+            if "fixtures" not in p.relative_to(scripts).parts
+        )
+        self.assertTrue(found, "no test files found - the glob is wrong")
+        self.assertEqual([f for f in found if f not in named], [])
+
     def test_the_contract_names_at_least_one_lint_and_one_test(self):
         entries, errors = self._contract()
         self.assertEqual(errors, [])
