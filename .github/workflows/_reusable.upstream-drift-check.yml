@@ -19,19 +19,20 @@ name: _reusable · upstream drift check
 # `uses: quadseven/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>`.
 # All actions SHA-pinned.
 #
-# Example caller:
+# Example caller (canary.upstream-drift-check.yml runs one on every PR that
+# touches this file):
 #   jobs:
 #     check:
 #       uses: quadseven/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>
 #       permissions: { contents: read, issues: write }
 #       with:
-#         name: claude-config
-#         upstream_repo: https://github.com/solatis/claude-config.git
+#         name: my-upstream
+#         upstream_repo: https://github.com/OWNER/REPO.git
 #         upstream_ref: refs/heads/main
-#         pin_file: .claude-config-pin
-#         runner: arc-somatic-scripts
+#         pin_file: .my-upstream-pin
+#         runner: ubuntu-latest
 #         sync_instructions: |
-#           Run `./scripts/update-claude-config.sh` then commit the bumped pin.
+#           Run `./scripts/update-my-upstream.sh` then commit the bumped pin.
 
 on:
   workflow_call:

@@ -1,0 +1,38 @@
+name: Canary - Upstream drift check reusable
+
+# Exercises _reusable.upstream-drift-check.yml on every PR that touches it
+# (infra-public#131). The pin in examples/upstream-drift-check/pin is the
+# commit an immutable upstream tag points at, so the run reads the pin,
+# resolves the tag with the bounded `git ls-remote`, compares, and takes the
+# up-to-date branch: it proves the plumbing without ever opening an issue.
+# The drift branch is not exercised here, because it writes to this public
+# tracker. `issues: write` is granted only because the reusable declares it.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/_reusable.upstream-drift-check.yml"
+      - ".github/workflows/canary.upstream-drift-check.yml"
+      - "examples/upstream-drift-check/**"
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    uses: ./.github/workflows/_reusable.upstream-drift-check.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      name: canary-actions-checkout
+      upstream_repo: https://github.com/actions/checkout.git
+      upstream_ref: refs/tags/does-not-exist-canary
+      pin_file: examples/upstream-drift-check/pin
