@@ -1,0 +1,31 @@
+name: Canary - Rust check reusable
+
+# Exercises check.rust.yml end to end on every PR that touches it, against
+# the fixture crate in examples/check-rust/, so a broken toolchain pin, cache
+# key or lint flag fails here instead of in a consuming repo (infra-public#129).
+# The same file is the worked example of a caller: copy the `uses:` job, point
+# working-directory at your crate, and pin the reusable to a commit SHA.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/check.rust.yml"
+      - ".github/workflows/canary.check-rust.yml"
+      - "examples/check-rust/**"
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    uses: ./.github/workflows/check.rust.yml
+    with:
+      working-directory: examples/check-rust
+      timeout-minutes: 15
