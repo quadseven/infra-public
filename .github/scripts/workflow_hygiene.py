@@ -86,14 +86,18 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # silently evaded the rule (#72; same failure mode as #64, which Rule 1b exists
 # to catch).
 PIN_COMMENT_RE = re.compile(r"#\s*(v\d+)(?:\.\d+)*")
-# Actions known to have EOL majors. `actions/checkout` v4 and
-# `actions/setup-node` v4 both run on Node-20 (EOL). v5+ runs on Node-24.
+# Actions known to have EOL majors: each listed major runs on Node-20 (EOL).
+# The first Node-24 major differs per action (checkout/setup-node/cache v5,
+# github-script v8, setup-uv v7), so the table lists the bad majors rather
+# than a floor.
 EOL_MAJOR: dict[str, set[str]] = {
     "actions/checkout": {"v4"},
     "actions/setup-node": {"v4"},
+    # #141: each of these majors' action.yml says `using: node20`.
+    "actions/cache": {"v4"},
+    "actions/github-script": {"v7"},
+    "astral-sh/setup-uv": {"v5", "v6"},
 }
-# All majors in EOL_MAJOR that are below the Node-24-capable floor.
-# (v5+ = Node-24 capable for these actions.)
 
 # Rule 5 - curl timeouts. A real `curl` invocation: the token is preceded by
 # start-of-string or a shell separator (not part of a longer word like
@@ -611,7 +615,7 @@ def lint_file(path: Path) -> list[str]:
                             f"{path}:{n}: action `{action}@{ref}` is SHA-pinned but "
                             f"commented as `{written}` (major "
                             f"`{comment_match.group(1)}` = Node-20/EOL) - "
-                            f"re-pin to a Node-24-capable major (v5+) at a full SHA"
+                            f"re-pin to a Node-24 major at a full SHA"
                         )
 
     if path.suffix == ".sh":

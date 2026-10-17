@@ -116,6 +116,31 @@ class ShaPinning(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("Node-20/EOL", errors[0])
 
+    def test_node20_majors_of_cache_github_script_and_setup_uv_are_flagged(self):
+        # #141: these three were shipped in reusables on Node-20 majors and
+        # passed Rule 1b because the table did not know them.
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        for action, comment in (
+            ("actions/cache", "v4.2.3"),
+            ("actions/github-script", "v7.0.1"),
+            ("astral-sh/setup-uv", "v5"),
+            ("astral-sh/setup-uv", "v6.4.0"),
+        ):
+            with self.subTest(action=action, comment=comment):
+                errors = self._lint(f"steps:\n  - uses: {action}@{sha}  # {comment}\n")
+                self.assertEqual(len(errors), 1, f"{action} # {comment} must be flagged")
+                self.assertIn("Node-20/EOL", errors[0])
+
+    def test_node24_majors_of_cache_github_script_and_setup_uv_pass(self):
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        for action, comment in (
+            ("actions/cache", "v5.1.0"),
+            ("actions/github-script", "v8.0.0"),
+            ("astral-sh/setup-uv", "v7.6.0"),
+        ):
+            with self.subTest(action=action, comment=comment):
+                self.assertEqual(self._lint(f"steps:\n  - uses: {action}@{sha}  # {comment}\n"), [])
+
     def test_local_composite_action_is_not_checked(self):
         text = "steps:\n  - uses: ./.github/actions/my-composite\n"
         self.assertEqual(self._lint(text), [])
