@@ -103,6 +103,9 @@ jobs:
             echo "could not resolve upstream ref '$UPSTREAM_REF' at '$UPSTREAM_REPO'" >&2
             exit 1
           fi
+          # Say both in the log too, so a run shows which branch it took and
+          # why without reading step outputs.
+          echo "pinned=$pinned upstream=$upstream"
           echo "pinned=$pinned"     >> "$GITHUB_OUTPUT"
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
           if [[ "$pinned" == "$upstream" ]]; then
