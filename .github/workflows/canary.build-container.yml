@@ -1,0 +1,46 @@
+name: Canary - Container build reusable
+
+# Exercises build.container.yml build-only (push: false, registry-type: none)
+# on every PR that touches it (infra-public#133), once per arch on a native
+# GitHub-hosted runner, so the native-CPU guard and the buildx step both run.
+# Nothing is pushed anywhere. `id-token: write` is granted only because the
+# reusable declares it for its ECR path, which this canary never takes.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/build.container.yml"
+      - ".github/workflows/canary.build-container.yml"
+      - "examples/build-container/**"
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04
+    uses: ./.github/workflows/build.container.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      context: examples/build-container
+      dockerfile: examples/build-container/Dockerfile
+      push: false
+      registry-type: none
