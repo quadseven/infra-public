@@ -6,6 +6,13 @@ name: Reusable · Deploy to GitHub Pages
 # grants the Pages permissions (a reusable can't elevate beyond the caller's
 # GITHUB_TOKEN); this workflow runs the standard publish on a native runner.
 # All actions SHA-pinned per the infra-public standard.
+#
+# Two jobs: `build` checks out, configures Pages and uploads the
+# `github-pages` artifact; `deploy` publishes it in the `github-pages`
+# environment. `dry_run: true` (#149) skips Configure Pages,
+# which needs a Pages site, and the whole deploy job, so nothing touches
+# Pages or an environment. canary.deploy-pages.yml runs it that way and
+# asserts what the artifact holds.
 
 on:
   workflow_call:
@@ -20,6 +27,11 @@ on:
         type: string
         required: false
         default: "ubuntu-latest"
+      dry_run:
+        description: "Build and upload the github-pages artifact, but skip Configure Pages and the deploy job, so nothing is published (CI canary)."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -31,14 +43,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ${{ inputs.runs_on }}
     # GitHub's default job timeout is 360 min (6h). Pages publishes take <2 min;
     # cap here because callers use a `uses:` job and can't set timeout-minutes.
     timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -47,11 +56,22 @@ jobs:
           # never git-over-HTTPS — so don't persist GITHUB_TOKEN in .git/config (#12).
           persist-credentials: false
       - name: Configure Pages
+        if: ${{ !inputs.dry_run }}
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
       - name: Upload static site
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3
         with:
           path: ${{ inputs.artifact_path }}
+
+  deploy:
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5

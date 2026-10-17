@@ -36,7 +36,7 @@ you can copy.
 | `build.container-multiarch.yml` | native amd64 and arm64 builds merged into one manifest list |
 | `ship.python.yml` | `check.python.yml`, then `build.container-multiarch.yml`, gated on the check |
 | `deploy.k8s.yml` | build, push and roll out a container to a Kubernetes cluster, with a rollout gate and smoke probe |
-| `deploy.pages.yml` | publish a directory to GitHub Pages |
+| `deploy.pages.yml` | publish a directory to GitHub Pages; `dry_run: true` uploads the Pages artifact and stops before the publish |
 | `_reusable.smoke-test.yml` | curl a list of endpoints with retries and assert status and body |
 | `_reusable.upstream-drift-check.yml` | open an issue when a pinned upstream repo moves past its pin |
 | `_reusable.leak-scan.yml` | refuse a PR, issue or tree that carries private identifiers (hostnames, private IPs, local paths, names) |
@@ -52,6 +52,10 @@ None is needed for the lint, test and build-only paths.
   `deploy.k8s.yml` push to ECR through an AWS role you trust for GitHub
   OIDC (`role_to_assume` / `aws-role-arn`), or to GHCR with the caller's
   `packages: write`. With `push: false` they only build.
+- **Pages site.** `deploy.pages.yml` publishes to a repository with GitHub
+  Pages enabled (source: GitHub Actions) and a `github-pages` environment,
+  with the caller's `pages: write` and `id-token: write`. With
+  `dry_run: true` it only builds and uploads the Pages artifact.
 - **Cluster access.** `deploy.k8s.yml` reaches the cluster either by joining
   a Tailscale tailnet with your auth key and using your kubeconfig, or from
   a runner that already runs inside the cluster (`cluster-access:

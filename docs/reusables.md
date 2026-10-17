@@ -29,7 +29,7 @@ names the test files under `.github/scripts/` that exercise its text.
 | [`check.python.yml`](#checkpythonyml) | `canary.ship-python.yml`, `check.spark-cave.yml` | `workflow_hygiene_test.py` |
 | [`check.rust.yml`](#checkrustyml) | `canary.check-rust.yml` | - |
 | [`deploy.k8s.yml`](#deployk8syml) | - | `deploy_k8s_steps_test.py` |
-| [`deploy.pages.yml`](#deploypagesyml) | - | - |
+| [`deploy.pages.yml`](#deploypagesyml) | `canary.deploy-pages.yml` | - |
 | [`ship.python.yml`](#shippythonyml) | `canary.ship-python.yml` | - |
 | [`sync.public-repo-docs.yml`](#syncpublic-repo-docsyml) | - | `workflow_hygiene_test.py` |
 
@@ -292,7 +292,7 @@ Run on PRs by: nothing in this repository. Tested by: `.github/scripts/deploy_k8
 
 Reusable - Deploy to GitHub Pages. Source: [`.github/workflows/deploy.pages.yml`](../.github/workflows/deploy.pages.yml).
 
-Run on PRs by: nothing in this repository. Tested by: nothing in this repository.
+Run on PRs by: `canary.deploy-pages.yml`. Tested by: nothing in this repository.
 
 ### Inputs
 
@@ -300,6 +300,7 @@ Run on PRs by: nothing in this repository. Tested by: nothing in this repository
 | --- | --- | --- | --- | --- |
 | `artifact_path` | string | no | `.` | Directory to publish as the Pages artifact (default: repo root). |
 | `runs_on` | string | no | `ubuntu-latest` | Runner label. |
+| `dry_run` | boolean | no | `false` | Build and upload the github-pages artifact, but skip Configure Pages and the deploy job, so nothing is published (CI canary). |
 
 
 ## ship.python.yml

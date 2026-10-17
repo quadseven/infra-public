@@ -1,0 +1,58 @@
+name: Canary - Pages deploy reusable
+
+# Exercises deploy.pages.yml up to, not including, the publish
+# (#149). dry_run: true, so the build job checks out and uploads
+# examples/deploy-pages/ as the github-pages artifact, and the deploy job,
+# which needs a Pages site and the github-pages environment this repo does
+# not have, is skipped. The assert job then downloads that artifact and
+# checks the fixture page is at its root, where Pages would serve it. The
+# pages and id-token grants are the ones deploy.pages.yml declares and a
+# caller must give; the deploy path that uses them is not taken here.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/deploy.pages.yml"
+      - ".github/workflows/canary.deploy-pages.yml"
+      - "examples/deploy-pages/**"
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    uses: ./.github/workflows/deploy.pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      artifact_path: examples
+      dry_run: true
+
+  assert:
+    needs: canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download the github-pages artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: github-pages
+          path: pages-artifact
+      - name: The fixture page is at the artifact root
+        run: |
+          set -euo pipefail
+          tar -tf pages-artifact/artifact.tar | sort
+          tar -xOf pages-artifact/artifact.tar ./index.html > index.html \
+            || { echo "::error::./index.html is not in the github-pages artifact"; exit 1; }
+          grep -q 'deploy-pages canary fixture' index.html \
+            || { echo "::error::index.html in the artifact is not the fixture page"; exit 1; }
+          echo "github-pages artifact holds the fixture index.html"
