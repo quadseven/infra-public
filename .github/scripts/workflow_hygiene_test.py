@@ -23,6 +23,8 @@ import unittest
 from pathlib import Path
 
 from workflow_hygiene import (
+    CANONICAL_RULE_COUNT,
+    IMPLEMENTED_RULES,
     SKIPPED_RULES,
     lint_branch_switch_local_action,
     lint_curl_timeouts,
@@ -555,12 +557,29 @@ class NewRuleParity(unittest.TestCase):
 
 
 class SkippedRules(unittest.TestCase):
-    def test_rules_3_4_and_10_are_declared_skipped_with_a_reason(self):
-        self.assertEqual(sorted(SKIPPED_RULES), [3, 4, 10])
+    def test_rules_2_3_4_10_and_13_are_declared_skipped_with_a_reason(self):
+        self.assertEqual(sorted(SKIPPED_RULES), [2, 3, 4, 10, 13])
         self.assertTrue(all(SKIPPED_RULES.values()))
 
+    def test_every_canonical_rule_is_implemented_or_skipped(self):
+        # infra-public#125: rules 2 and 13 were in neither list, and a clean
+        # run read as having checked them. A number in neither now fails here.
+        canonical = set(range(1, CANONICAL_RULE_COUNT + 1))
+        implemented, skipped = set(IMPLEMENTED_RULES), set(SKIPPED_RULES)
+        self.assertEqual(sorted(canonical - implemented - skipped), [])
+        self.assertEqual(sorted(implemented & skipped), [])
+        self.assertEqual(sorted((implemented | skipped) - canonical), [])
+
+    def test_every_rule_number_is_named_in_the_linter_source(self):
+        src = Path(__file__).with_name("workflow_hygiene.py").read_text()
+        missing = [
+            n for n in range(1, CANONICAL_RULE_COUNT + 1)
+            if not re.search(rf"Rule {n}\b", src)
+        ]
+        self.assertEqual(missing, [])
+
     def test_label_names_them_as_the_canonical_linter_does(self):
-        self.assertEqual(skipped_rules_label(), "rules 3, 4 and 10 skipped")
+        self.assertEqual(skipped_rules_label(), "rules 2, 3, 4, 10 and 13 skipped")
 
     def test_runtime_output_names_the_skipped_rules(self):
         out = io.StringIO()
@@ -572,7 +591,7 @@ class SkippedRules(unittest.TestCase):
         finally:
             os.chdir(before)
         self.assertEqual(code, 0, out.getvalue())
-        self.assertIn("rules 3, 4 and 10 skipped", out.getvalue())
+        self.assertIn("rules 2, 3, 4, 10 and 13 skipped", out.getvalue())
 
 
 class BranchSwitchAndGhAndPinLabels(unittest.TestCase):

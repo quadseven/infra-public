@@ -13,9 +13,10 @@ Ported canonical rules:
   Rule 12: avoid `gh` calls in jobs on an `arc-*` runner label.
 
 The local Rule 1b also rejects pinned actions labelled with an EOL Node
-major. Rules 3, 4, and 10 are declared skips: this repository has no
-environment-secret manifest, ARC runner fleet, or Pulumi stack tree.
-Rules 2 and 13 concern infrastructure absent from this repository.
+major. Rules 2, 3, 4, 10 and 13 are declared skips, each with its reason in
+SKIPPED_RULES below. Every canonical rule number (1 through
+CANONICAL_RULE_COUNT) is in exactly one of IMPLEMENTED_RULES and
+SKIPPED_RULES, and workflow_hygiene_test.py fails if one is in neither.
 
 Fixtures under .github/scripts/fixtures/ record canonical verdicts for
 rules 5, 8, 11, and 12. Set CANONICAL_HYGIENE_LINTER to a local copy of
@@ -36,15 +37,32 @@ WF_DIR = GITHUB_DIR / "workflows"
 FIXTURES_DIR = GITHUB_DIR / "scripts" / "fixtures"
 ACTIONS_DIR = GITHUB_DIR / "actions"
 
+# The canonical linter numbers its rules 1 through this. Raise it when a rule
+# is added upstream; the accounting test then fails until the new number is
+# put in IMPLEMENTED_RULES or SKIPPED_RULES.
+CANONICAL_RULE_COUNT = 13
+
+# Canonical rules this file enforces (lint_file / lint_pin_labels).
+IMPLEMENTED_RULES: tuple[int, ...] = (1, 5, 6, 7, 8, 9, 11, 12)
+
 # Rules in scope of the canonical set that this repo skips, with why. The run
 # summary names them so a clean run cannot be read as having checked them.
 SKIPPED_RULES: dict[int, str] = {
+    # Rule 2 - dead-cluster references in live code: this repo names no
+    # cluster to retire, and the leak scanner already refuses private
+    # infrastructure identifiers on every PR, which is what a dead-cluster
+    # name here would be.
+    2: "no cluster names; the leak scan refuses private identifiers",
     # Rule 3 - env-scoped secrets: no list of them, no manifest to derive one.
     3: "no environment-scoped secret list",
     # Rule 4 - ARC runner routing: no ARC fleet, plain GitHub-hosted runners.
     4: "no ARC runner fleet",
     # Rule 10 - PR-preview reachability: no iac.pulumi.* stacks.
     10: "no Pulumi stacks",
+    # Rule 13 - no image push from a runner on the shared private pool: this
+    # repo's own jobs run on GitHub-hosted runners, and a reusable's runner is
+    # an input its caller picks, so there is no pool here to keep pushes off.
+    13: "no shared private runner pool",
 }
 
 # Local composites (./.github/actions/...) and same-repo reusables have no

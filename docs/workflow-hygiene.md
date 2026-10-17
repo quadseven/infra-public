@@ -9,28 +9,60 @@ consumer, and nothing local caught it before this gate (infra-public#46).
 
 ## Authoritative rule set
 
-The canonical, full rule set lives in the private fleet repo:
-`infra/.github/scripts/workflow_hygiene.py` (renamed from `infrastructure`
-on 2026-07-08). It has **twelve** rules as of 2026-09-15.
+The canonical rule set lives in a private linter that this repo cannot
+read. It numbers its rules 1 through 13. This copy ports the ones that
+apply here (same regexes, same `# hygiene: allow-*` exception-comment
+convention) and declares the rest skipped, with a reason.
 
-`infra-public`'s copy ports five of them verbatim (same regexes, same
-`# hygiene: allow-*` exception-comment convention):
+The record of which is which is **code, not this page**: three constants at
+the top of `workflow_hygiene.py`.
+
+- `CANONICAL_RULE_COUNT` - the highest canonical rule number (13).
+- `IMPLEMENTED_RULES` - the canonical rules this copy enforces.
+- `SKIPPED_RULES` - the canonical rules it does not, each with its reason.
+  The run summary names them (`rules 2, 3, 4, 10 and 13 skipped`), so a
+  clean run cannot be read as having checked them.
+
+`workflow_hygiene_test.py` fails if a number from 1 to
+`CANONICAL_RULE_COUNT` is in neither list, in both, or not named as
+`Rule N` in the linter source (infra-public#125). Earlier versions of this
+page kept the ledger in prose, and it drifted at every port (#71, #119,
+#125); the test is what keeps it honest now.
+
+### Implemented
 
 1. SHA-pinning - every third-party `uses:` must be a full 40-hex commit SHA.
-5. curl timeouts - every real `curl`, in any workflow field (not only `run:`
-   blocks) and in `.sh` files, needs `--max-time`/`-m` and `--connect-timeout`.
-   Its verdicts are checked against the canonical's over a shared corpus in
-   `.github/scripts/fixtures/rule5_parity/`.
+5. curl timeouts - every real `curl`, in any workflow field and in `.sh`
+   files, needs `--max-time`/`-m` and `--connect-timeout`.
 6. `set -e` in standalone shell scripts under `.github/`.
 7. per-job `timeout-minutes:` on any job with `runs-on:`.
+8. a `run:` step that switches branches must restore the tree before a
+   later `uses: ./.github/actions/...`.
 9. GHA template injection - no `${{ github.event.* }}` or
    `${{ steps.*.outputs.* }}` inside a `run:` script; pass it via `env:`.
-   Exception: `# hygiene: allow-interpolation <reason>`. Ported 2026-09-22 so
-   public fleet repos that run this copy are covered for it.
+   Exception: `# hygiene: allow-interpolation <reason>`.
+11. one version label per pinned action SHA, repo-wide.
+12. no `gh` CLI in a job on an `arc-*` runner label.
+
+Rules 5, 8, 11 and 12 have parity corpora under
+`.github/scripts/fixtures/rule<N>_parity/` that record the canonical
+linter's verdicts. Set `CANONICAL_HYGIENE_LINTER` to a local copy of the
+canonical script to recheck them.
+
+### Skipped
+
+- **2.** dead-cluster references in live code - this repo names no cluster
+  to retire, and the leak scan already refuses private infrastructure
+  identifiers on every PR, which is what such a name here would be.
+- **3.** environment-scoped secrets - there is no list of them here and no
+  manifest to derive one from.
+- **4.** ARC runner routing - this repo's own CI uses GitHub-hosted runners.
+- **10.** PR-preview reachability for auto-applying stacks - there are no
+  Pulumi stacks here.
+- **13.** no image push from the shared private runner pool - there is no
+  such pool here; a reusable's runner is an input its caller picks.
 
 ### Local-only, with no canonical counterpart
-
-One rule is this repo's own and is numbered off the canonical scheme:
 
 - **1b.** EOL Node major detection (#18) - a SHA-pinned action whose `# vN`
   comment names a known-EOL major (`actions/checkout` v4,
@@ -38,77 +70,15 @@ One rule is this repo's own and is numbered off the canonical scheme:
   Node-20. The comment is reduced to its bare major before the lookup, so
   `# v4.2.2` cannot evade the `{"v4"}` table (#72, same failure mode as #64).
 
-It is listed because a ledger that accounts only for *canonical* rules cannot
-account for this file's own behaviour - someone counting entries against the
-canonical twelve would find an enforced rule in none of the three lists.
-Having no canonical number is precisely why it goes stale quietly: no upstream
-change ever prompts a re-read of it.
-
-Deliberately **not** ported - each would be dead or wrong code here:
-
-- **Rule 2** dead-cluster reference checking - k8s-ts is a private-infra
-  teardown artifact.
-- **Rule 4** ARC-runner-routing policy - infra-public's own CI uses plain
-  GitHub-hosted runners.
-
-### Not yet dispositioned
-
-**Rules 3, 8, 10, 11 and 12 are in neither list above** - nobody has
-decided whether they apply here. Not obviously inapplicable, so this is a
-gap, not a rejection (infra-public#71):
-
-- **3.** Environment-scoped secrets - a job reading a deploy-role secret must
-  declare `environment:`. A live instance already happened here (#51).
-- **8.** Working-tree branch switch before a local action - a `run:` step that
-  switches branches breaks any later `uses: ./.github/actions/...`.
-- **10.** PR-preview reachability for auto-applying stacks - scoped upstream
-  to `iac.pulumi.*.yml`. This repo has no Pulumi anywhere
-  (`grep -rl pulumi .github/workflows/` is empty), so this is probably
-  *not applicable* rather than undecided - but it should say so explicitly.
-- **11.** One version label per pinned action - reinforces Rule 1, which *is*
-  ported. The strongest port candidate of the five.
-- **12.** No `gh` CLI in an `arc-*` pool job - same reasoning as Rule 4's
-  rejection; this repo has no ARC pool.
-
 ## Keeping the two in sync
 
-There is no automated sync between the two copies - a rule change in the
-private repo's `workflow_hygiene.py` does not automatically propagate here.
-When one of the four shared rules changes there (regex tightened, a new
-exception marker added, a bug fixed), port the equivalent change here by
-hand and update `.github/scripts/workflow_hygiene_test.py`'s fixtures to
-match. The private repo's copy remains the source of truth for the rule
-*definitions*; this copy is the source of truth for infra-public's own
-compliance with them.
+There is no automated sync between the two copies. When a shared rule
+changes upstream (regex tightened, a new exception marker, a bug fixed),
+port the equivalent change here by hand and update the fixtures to match.
+When upstream adds a rule, raise `CANONICAL_RULE_COUNT`; the accounting test
+then fails until the new number is placed in one of the two lists.
 
-Nothing enforces that policy, and the count above has now been wrong three
-times over: this doc said **seven** while the canonical set grew past it, and
-two successive corrections (to nine, then to ten) were each overtaken before
-they merged - Rule 10 landed 2026-09-12, Rule 11 on 2026-09-14 at 07:41 and
-Rule 12 the same day at 12:33. Five rules arrived without the ledger noticing
-any of them.
-
-A local re-derivation exists, and it is a **convenience, not the guard**:
-
-```
-git -C ../infra show origin/main:.github/scripts/workflow_hygiene.py \
-  | grep -cE "^  [0-9]+\. "
-```
-
-Use the `git show origin/main` form rather than reading the working tree: a
-sibling checkout that is merely out of date answers confidently with the old
-number and nothing says so. Either way it needs a checkout of `infra`, which
-is **private**, so it can never run in this repo's CI - and a convention a
-human must remember is exactly what has already failed here five times.
-
-**The real guard has to live in `infra`, not here**, because visibility only
-runs one way: `infra` can read this public repo's ledger, but this repo
-cannot read `infra` at all. Infra already has the machinery - `rule_census()`
-and `TestRuleListMatchesImplementation` (infra #2721), which today guard the
-canonical list against the canonical *code*. Extending that one step outward
-to assert every canonical rule number appears in exactly one of the three
-lists above is infra-public#71's remaining work.
-
-Prefer the per-rule ledger above to the total. A count has no anchor to the
-thing it counts, so an addition upstream falsifies it silently; a missing
-*entry* is something a reader can see.
+The canonical copy remains the source of truth for the rule *definitions*;
+this copy is the source of truth for infra-public's own compliance with
+them. Because this repo cannot read the private one, the check that
+`CANONICAL_RULE_COUNT` itself is current has to live on the private side.
