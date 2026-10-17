@@ -1,0 +1,44 @@
+name: Canary - Ship Python reusable
+
+# Exercises ship.python.yml, and through it check.python.yml and
+# build.container-multiarch.yml, on every PR that touches them
+# (infra-public#135). push: false, so the check job lints and tests the
+# fixture in examples/ship-python/, then both native builds (amd64, arm64)
+# run and nothing is published. The permissions are the ones ship.python.yml
+# declares and a caller must grant; the push paths that use them are not
+# taken here.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ship.python.yml"
+      - ".github/workflows/build.container-multiarch.yml"
+      - ".github/workflows/check.python.yml"
+      - ".github/workflows/canary.ship-python.yml"
+      - "examples/ship-python/**"
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    uses: ./.github/workflows/ship.python.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      image: ghcr.io/example/ship-python-canary
+      tag: canary
+      push: false
+      registry-type: none
+      working-directory: examples/ship-python
+      context: examples/ship-python
+      dockerfile: examples/ship-python/Dockerfile
