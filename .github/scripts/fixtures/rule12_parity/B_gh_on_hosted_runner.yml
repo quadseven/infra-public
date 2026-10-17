@@ -1,0 +1,6 @@
+# canonical-rule12-lines: none
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh issue create --title t

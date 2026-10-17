@@ -1,103 +1,28 @@
 #!/usr/bin/env python3
-"""Workflow-hygiene linter for infra-public's own workflows (infra-public#46).
+"""Workflow hygiene checks for this public reusable workflow library.
 
-infra-public is the shared reusable-workflow library every fleet repo
-inherits via `uses: quadseven/infra-public/...`, so drift here is inherited
-by every consumer with nothing local to catch it - #18 (Node-20-era action
-pins that still passed a SHA-only check) was found and fixed only by a
-manual audit, not by any gate.
+Ported canonical rules:
+  Rule 1: pin third-party actions to full commit SHAs.
+  Rule 5: bound curl calls with total and connection timeouts.
+  Rule 6: enable `set -e` in standalone shell scripts.
+  Rule 7: set `timeout-minutes` for runner jobs.
+  Rule 8: restore the working tree before using a local action after a
+          branch switch.
+  Rule 9: pass attacker-controlled expressions through `env`, not `run` text.
+  Rule 11: use one version label for each pinned action SHA, repo-wide.
+  Rule 12: avoid `gh` calls in jobs on an `arc-*` runner label.
 
-The canonical rule set lives in `infra/.github/scripts/workflow_hygiene.py`
-(the private fleet repo; renamed from `infrastructure` 2026-07-08) and has
-THIRTEEN rules as of 2026-09-22. Five are genuinely repo-agnostic and ported
-here verbatim (same regexes, same exception-comment conventions, so a
-contributor who knows one knows both):
+The local Rule 1b also rejects pinned actions labelled with an EOL Node
+major. Rules 3, 4, and 10 are declared skips: this repository has no
+environment-secret manifest, ARC runner fleet, or Pulumi stack tree.
+Rules 2 and 13 concern infrastructure absent from this repository.
 
-  1. SHA-pinning: every third-party `uses:` must be a full 40-hex commit
-     SHA, not a floating `@vN`/`@main` tag (supply-chain drift + the Node-20
-     EOL problem #18 fixed).
-  5. curl timeouts: every real `curl` - in any field of a workflow, not
-     only `run:` blocks, and in `.sh` files - needs both a total-time bound
-     (--max-time/-m) and a connect bound (--connect-timeout). Exception:
-     `# hygiene: allow-curl-no-timeout <reason>`. Its verdicts are checked
-     against the canonical linter's over a shared corpus in
-     .github/scripts/fixtures/rule5_parity/ (infra#3866).
-  6. set -e in standalone shell scripts: every `.sh` under .github/ must
-     enable -e. Exception: `# hygiene: allow-no-set-e <reason>`.
-  7. per-job timeout-minutes: every job with `runs-on:` must set
-     `timeout-minutes:` (GitHub's 360-min default silently burns runner
-     time on a hang). A reusable-workflow CALLER job (top-level `uses:`
-     instead of `runs-on:`) is exempt. Exception:
-     `# hygiene: allow-no-timeout-minutes <reason>`.
-  9. GHA template injection in `run:` scripts: no
-     `${{ github.event.* }}` or `${{ steps.*.outputs.* }}` inside a
-     `run:` script - GitHub pastes it into the script TEXT, so a crafted
-     value can close a quote and execute. Pass it via `env:` and use
-     "$VAR". Scoped to those two attacker-influenceable families on
-     purpose. Exception: `# hygiene: allow-interpolation <reason>`.
-     Ported 2026-09-22 so public fleet repos that run this copy (they
-     cannot read the private canonical) are covered for it.
+Fixtures under .github/scripts/fixtures/ record canonical verdicts for
+rules 5, 8, 11, and 12. Set CANONICAL_HYGIENE_LINTER to a local copy of
+the canonical script to recheck those recorded verdicts.
 
-LOCAL-ONLY, no canonical counterpart - this repo enforces one rule the
-canonical set does not have, so it is numbered off the canonical scheme:
-
- 1b. EOL Node major detection (#18). A SHA-pinned action whose `# vN`
-     comment names a known-EOL major (`actions/checkout` v4,
-     `actions/setup-node` v4) passes the Rule 1 SHA check but still runs on
-     Node-20. Implemented at PIN_COMMENT_RE / EOL_MAJOR and enforced in the
-     `uses:` scan below. The comment is reduced to its bare major before the
-     lookup, so `# v4.2.2` cannot evade the `{"v4"}` table (#72, same
-     failure mode as #64).
-
-     It is listed here because a ledger that accounts only for canonical
-     rules cannot account for this file's own behaviour: a reader counting
-     entries against the canonical twelve would find an enforced rule in
-     none of them. Having no canonical number is exactly why it goes stale
-     quietly - there is no upstream change to prompt a re-read.
-
-Deliberately NOT ported - infra-specific, would be dead code or actively
-wrong here: dead-cluster reference checking (Rule 2 - k8s-ts is a
-private-infra teardown artifact) and ARC-runner-routing policy (Rule 4 -
-infra-public's own CI uses plain GitHub-hosted runners, see
-check.spark-cave.yml - there is no ARC fleet-routing concept in this repo).
-
-NOT YET DISPOSITIONED - tracked in #71. Neither ported nor deliberately
-rejected; nobody has written down which they should be. Listed so the gap is
-visible rather than silent. This is the open question, NOT a decision:
-
-  3. environment-scoped secrets. Not hypothetical here: #51
-     ("build.container-multiarch.yml consumes the env-scoped ECR OIDC role
-     without an environment input") was a live instance in this repo, found
-     by hand rather than by this gate.
-  8. working-tree branch switch before a local action. A bare
-     `git checkout <branch>` deletes `.github/` from the working tree, so
-     every later `uses: ./...` dies. No live violation here today.
- 10. PR-preview reachability for auto-applying stacks. Scoped upstream to
-     `iac.pulumi.*.yml`; this repo has no Pulumi at all, so likely
-     not-applicable rather than undecided - but say so explicitly.
- 11. one version label per pinned action. Reinforces Rule 1, which IS
-     ported, so this is the strongest port candidate of the seven.
- 12. no `gh` CLI in an arc-pool job. Same reasoning as Rule 4's rejection -
-     this repo has no ARC pool.
- 13. no image push from a runner on the shared private-infra pool. Same
-     shape as Rules 4 and 12 - it encodes which runner pool may reach a
-     particular registry, a fact this repo has no equivalent of - so the
-     likely answer is not-applicable. Recorded as undecided rather than
-     rejected because nobody has actually made that call yet.
-
-Deciding these seven - and recording HOW this ledger stays current - is the
-remaining work in #71. Note the count above is a hand-copied fact with no
-local anchor: it has now been wrong four times (seven, then a correction to
-nine, then one to ten, then twelve - which went stale the same way when
-Rule 13 landed upstream, found by the 2026-09-22 sweep). The durable guard
-cannot live here, because visibility only runs one way: `infra` is private,
-so this repo's CI can never read it, while `infra` can read this public one.
-The assertion belongs upstream, next to `rule_census()` /
-`TestRuleListMatchesImplementation`, which already guard the canonical list
-against the canonical code and need only extend one step outward.
-
-Run locally:  python3 .github/scripts/workflow_hygiene.py
-Exit 0 = clean; exit 1 = violations (printed as ::error:: for CI annotation).
+Run: python3 .github/scripts/workflow_hygiene.py
+Exit 0 means clean; exit 1 reports violations as CI annotations.
 """
 
 from __future__ import annotations
@@ -108,7 +33,19 @@ from pathlib import Path
 
 GITHUB_DIR = Path(".github")
 WF_DIR = GITHUB_DIR / "workflows"
-PARITY_DIR = GITHUB_DIR / "scripts" / "fixtures" / "rule5_parity"
+FIXTURES_DIR = GITHUB_DIR / "scripts" / "fixtures"
+ACTIONS_DIR = GITHUB_DIR / "actions"
+
+# Rules in scope of the canonical set that this repo skips, with why. The run
+# summary names them so a clean run cannot be read as having checked them.
+SKIPPED_RULES: dict[int, str] = {
+    # Rule 3 - env-scoped secrets: no list of them, no manifest to derive one.
+    3: "no environment-scoped secret list",
+    # Rule 4 - ARC runner routing: no ARC fleet, plain GitHub-hosted runners.
+    4: "no ARC runner fleet",
+    # Rule 10 - PR-preview reachability: no iac.pulumi.* stacks.
+    10: "no Pulumi stacks",
+}
 
 # Local composites (./.github/actions/...) and same-repo reusables have no
 # pinning concern; only owner/repo@ref refs are checked. `['"]?` before the
@@ -209,7 +146,7 @@ DESC_BLOCK_RE = re.compile(r"^(\s*)description:\s*[|>]")
 # input that SUPPLIES the bound. Deliberately NOT "only lines inside run:
 # scripts": callers pass real curl commands through other fields (a
 # `smoke-cmd: curl ...` input to a reusable that executes it), and those must
-# stay checked (infra#3866).
+# stay checked.
 PROSE_FIELD_RE = re.compile(r"^\s*(?:-\s*)?(?:description|name):\s*(?![|>])\S")
 
 
@@ -412,6 +349,222 @@ def _injection_error(path: Path, n: int, expr: str) -> str:
     )
 
 
+# Rule 8 - working-tree branch switch before a local action (#1850). A
+# path-scoped `git checkout <ref> -- <path>` only copies files out and is
+# FINE; a bare `git checkout <branch>` / `git switch <branch>` replaces the
+# whole tree. Returning via an explicit sha, `-`, or `@{-1}` restores it.
+BRANCH_SWITCH_RE = re.compile(
+    r"\bgit\s+(?:checkout|switch)\s+(?:-b\s+|-B\s+|-c\s+)?"
+    r"(?P<ref>[A-Za-z0-9._/${}\"\'-]+)"
+)
+LOCAL_USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*(\./[^\s]+)")
+BRANCH_SWITCH_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-branch-switch\b")
+
+
+def _switch_line_after(code: str, n: int, switch_line: int | None) -> int | None:
+    """The line of the branch switch still in force after `code` (line `n`):
+    a real switch sets it, a return to the original ref clears it, a
+    path-scoped checkout leaves it alone."""
+    m = BRANCH_SWITCH_RE.search(code)
+    if not m:
+        return switch_line
+    if "--" in code[m.end() :]:
+        return switch_line
+    ref = m.group("ref")
+    # `-`, `@{-1}`, or an interpolated sha/var is a RETURN, not a switch
+    if ref in ("-", "@{-1}") or "$" in ref:
+        return None
+    return n
+
+
+def lint_branch_switch_local_action(path: Path, text: str) -> list[str]:
+    """Rule 8. Find each working-tree branch switch, then look for a later
+    local `uses: ./...` with no return-to-ref in between. Reports the `uses:`
+    line, since that is where CI actually dies."""
+    if BRANCH_SWITCH_ALLOW_RE.search(text):
+        return []
+    errors: list[str] = []
+    switch_line: int | None = None
+    for n, line in enumerate(text.splitlines(), 1):
+        code = code_part(line)
+        if BRANCH_SWITCH_RE.search(code):
+            switch_line = _switch_line_after(code, n, switch_line)
+            continue
+        u = LOCAL_USES_RE.match(code)
+        if u and switch_line is not None:
+            errors.append(
+                f"{path}:{n}: Rule 8: local action `{u.group(1)}` is used after the "
+                f"working tree was switched to another branch at line "
+                f"{switch_line} - that branch does not carry `.github/`, so "
+                f"the action is gone and this step fails with \"Can't find "
+                f"'action.yml'\". Capture ORIG_SHA=$(git rev-parse HEAD) "
+                f'before the switch and `git checkout "$ORIG_SHA"` after '
+                f"committing (#1850)"
+            )
+    return errors
+
+
+# Rule 12 - no `gh` CLI in a job on the arc pool (#3896). A real call is `gh`
+# followed by a subcommand, at the start of a command: `ghcr.io`, `ghost` and
+# `gh` inside a comment are not calls.
+GH_CALL_RE = re.compile(
+    r"(?:^|[\s;&|(`\"'])gh\s+(?:api|issue|pr|run|release|repo|workflow|label|search|"
+    r"secret|variable|auth|gist|cache|project|attestation|extension)\b"
+)
+GH_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-gh\b")
+# An arc label, not a label that merely contains `arc-` (worker-arc-example).
+ARC_IN_RUNS_ON_RE = re.compile(r"(?<![\w-])arc-[a-z0-9-]+")
+
+
+def _shell_code(line: str) -> str:
+    """The line up to its shell comment.
+
+    As in the shell itself, a comment starts at an UNQUOTED `#` that begins a
+    word. `${REF#refs/heads/}`, `$#`, a URL fragment and a `#` inside quotes
+    (`echo "a # b" && gh ...`) are all code, and cutting at any of them would
+    hide a `gh` call later on the same line. A regex cannot track quotes, so
+    this walks the line. Also applied to the `runs-on:` line, where YAML's
+    comment rule is the same.
+    """
+    quote = None
+    prev = " "
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and quote != "'":
+            i += 2  # an escaped character is never a quote or a comment
+            prev = "x"
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and prev.isspace():
+            return line[:i]
+        prev = ch
+        i += 1
+    return line
+
+
+def _job_blocks(lines: list[str]):
+    """Yield (job_name, key_index, block) for each job in the `jobs:` map,
+    where block is the key line plus everything indented deeper than it (>2
+    spaces) up to the next job key or a dedent to top level."""
+    n = len(lines)
+    i = 0
+    in_jobs = False
+    while i < n:
+        line = lines[i]
+        if JOBS_HEADER_RE.match(line):
+            in_jobs = True
+        elif in_jobs and line.strip() and not line[0].isspace():
+            # A non-indented, non-blank line ends the jobs: map (a comment
+            # at column 0 is not a key and does not).
+            in_jobs = line.lstrip().startswith("#")
+        m = JOB_KEY_RE.match(line) if in_jobs else None
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and not (lines[j].strip() and _indent(lines[j]) <= 2):
+            j += 1
+        yield m.group(1), i, lines[i:j]
+        i = j
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def lint_gh_on_arc(path: Path, text: str) -> list[str]:
+    """Rule 12. For each job whose `runs-on:` names an `arc-*` label, flag
+    every `run:` script line that calls `gh`."""
+    errors: list[str] = []
+    for job_name, key_line, block in _job_blocks(text.splitlines()):
+        runs_on = next((b for b in block if JOB_RUNS_ON_RE.match(b)), None)
+        label = ARC_IN_RUNS_ON_RE.search(_shell_code(runs_on)) if runs_on else None
+        if label is None or any(GH_ALLOW_RE.search(b) for b in block):
+            continue
+        for n, line in _run_script_lines(block):
+            if GH_CALL_RE.search(_shell_code(line)):
+                errors.append(
+                    f"{path}:{key_line + n}: Rule 12: `gh` in job `{job_name}` on "
+                    f"`{label.group(0)}` - the arc pool has no gh CLI, so this "
+                    f"dies with exit 127 at run time and nothing before then "
+                    f"can see it. Use curl + jq, or an inline "
+                    f"`# hygiene: allow-gh <reason>` if the job installs gh"
+                )
+    return errors
+
+
+# Rule 11 - one version label per pinned action (#2828). The trailing
+# `# vN` is what a reader trusts; one SHA under two labels means one is
+# wrong. PIN_LABEL_RE reads the raw line, because code_part() strips the
+# very comment it needs.
+PIN_LABEL_RE = re.compile(
+    r"""^\s*-?\s*uses:\s*['"]?([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40})['"]?\s*#\s*(v[0-9][0-9A-Za-z.+-]*)"""
+)
+# Deliberately looser, and only on a `uses:` key: a 40-hex ref followed by a
+# `# v...` comment. A line this matches that PIN_LABEL_RE does not is a pin the
+# check cannot see, so it is reported by line rather than silently skipped.
+PIN_LABEL_LOOSE_RE = re.compile(r"^\s*-?\s*\{?\s*uses:.*@[0-9a-f]{40}\S*\s*#\s*v[0-9]")
+
+
+def _collect_pin_labels(
+    path: Path, text: str, sites: dict[str, dict[str, list[str]]], unreadable: list[str]
+) -> None:
+    for n, line in enumerate(text.splitlines(), 1):
+        m = PIN_LABEL_RE.match(line)
+        if m:
+            sites.setdefault(m.group(1), {}).setdefault(m.group(2), []).append(
+                f"{path}:{n}"
+            )
+        elif PIN_LABEL_LOOSE_RE.match(line):
+            unreadable.append(f"{path}:{n}")
+
+
+def lint_pin_labels(files: list[Path]) -> tuple[list[str], str]:
+    """Rule 11 across every workflow and composite action, as (errors,
+    summary). Compared repo-wide, since a conflict is files disagreeing.
+
+    Both matchers start at a `uses:` key, so a commented-out step or a
+    prose comment is never read as a pin. A labelled pin the strict matcher
+    cannot read is an error naming its line, even when other pins were read,
+    so a quoted or flow-style pin cannot hide a conflict."""
+    sites: dict[str, dict[str, list[str]]] = {}
+    unreadable: list[str] = []
+    for path in files:
+        _collect_pin_labels(path, path.read_text(), sites, unreadable)
+    errors = [
+        f"Rule 11: {pin}: one SHA under {len(labels)} version labels ("
+        + "; ".join(
+            f"`# {lab}` at {', '.join(where)}" for lab, where in sorted(labels.items())
+        )
+        + ") - at least one is wrong; label every site with the release this SHA is (#2828)"
+        for pin, labels in sorted(sites.items())
+        if len(labels) > 1
+    ]
+    if unreadable:
+        errors.append(
+            f"Rule 11: pin-label check: {len(unreadable)} labelled pin(s) the matcher cannot read, so a "
+            f"conflict there would be missed: {', '.join(unreadable)} - write them as "
+            f"`uses: owner/action@<sha>  # vN` (#2828)"
+        )
+    conflicting = sum(len(labels) > 1 for labels in sites.values())
+    return errors, (
+        f"workflow_hygiene: {len(sites)} distinct labelled action@sha pins, "
+        f"{conflicting} with conflicting labels"
+    )
+
+
+def skipped_rules_label() -> str:
+    """`rules 3, 4 and 10 skipped`, in the canonical linter's wording."""
+    nums = [str(n) for n in sorted(SKIPPED_RULES)]
+    named = nums[0] if len(nums) == 1 else f"{', '.join(nums[:-1])} and {nums[-1]}"
+    return f"rule{'s' if len(nums) > 1 else ''} {named} skipped"
+
+
 def lint_file(path: Path) -> list[str]:
     errors: list[str] = []
     text = path.read_text()
@@ -452,6 +605,8 @@ def lint_file(path: Path) -> list[str]:
         errors.extend(lint_template_injection(path, text))
         if path.parent == WF_DIR:
             errors.extend(lint_job_timeouts(path, text))
+            errors.extend(lint_branch_switch_local_action(path, text))
+            errors.extend(lint_gh_on_arc(path, text))
 
     return errors
 
@@ -461,25 +616,29 @@ def main() -> int:
     if WF_DIR.is_dir():
         targets.extend(sorted(WF_DIR.glob("*.yml")))
     if GITHUB_DIR.is_dir():
-        # The Rule 5 parity corpus holds deliberately bad `.sh` cases: test
+        # The parity corpora hold deliberately bad cases (some `.sh`): test
         # data, not scripts this repo runs.
         targets.extend(
-            p for p in sorted(GITHUB_DIR.rglob("*.sh")) if PARITY_DIR not in p.parents
+            p for p in sorted(GITHUB_DIR.rglob("*.sh")) if FIXTURES_DIR not in p.parents
         )
 
     all_errors: list[str] = []
     for path in targets:
         all_errors.extend(lint_file(path))
+    pin_errors, pin_summary = lint_pin_labels(
+        sorted(WF_DIR.glob("*.yml")) + sorted(ACTIONS_DIR.glob("**/action.yml"))
+    )
+    all_errors.extend(pin_errors)
+    print(pin_summary)
 
+    where = f"{len(targets)} files checked; {skipped_rules_label()}"
     if not all_errors:
-        print(f"workflow_hygiene: clean ({len(targets)} files checked)")
+        print(f"workflow_hygiene: clean ({where})")
         return 0
 
     for err in all_errors:
         print(f"::error::{err}")
-    print(
-        f"workflow_hygiene: {len(all_errors)} violation(s) in {len(targets)} files checked"
-    )
+    print(f"workflow_hygiene: {len(all_errors)} violation(s) in {where}")
     return 1
 
 

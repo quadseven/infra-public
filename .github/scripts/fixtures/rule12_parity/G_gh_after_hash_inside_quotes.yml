@@ -1,0 +1,6 @@
+# canonical-rule12-lines: 6
+jobs:
+  report:
+    runs-on: arc-example
+    steps:
+      - run: echo "a # b" && gh pr list

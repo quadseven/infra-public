@@ -1,0 +1,6 @@
+# canonical-rule12-lines: none
+jobs:
+  report:
+    runs-on: arc-example
+    steps:
+      - run: gh issue list  # hygiene: allow-gh this job installs gh first
