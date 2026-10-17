@@ -1,0 +1,19 @@
+[project]
+name = "ship-python-canary"
+version = "0.1.0"
+description = "Fixture for canary.ship-python.yml: the smallest uv project ship.python.yml can lint, test and build."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.15"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
