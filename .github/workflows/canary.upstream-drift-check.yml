@@ -34,5 +34,5 @@ jobs:
     with:
       name: canary-actions-checkout
       upstream_repo: https://github.com/actions/checkout.git
-      upstream_ref: refs/tags/does-not-exist-canary
+      upstream_ref: refs/tags/v5.0.1
       pin_file: examples/upstream-drift-check/pin
