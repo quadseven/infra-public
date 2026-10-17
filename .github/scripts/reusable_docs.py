@@ -49,18 +49,18 @@ BLOCK_RE = re.compile(r"^[|>][+-]?\s*$")
 # Non-ASCII that appears in workflow text, spelled in ASCII for the page.
 # Anything else non-ASCII is an error, so the page stays ASCII.
 ASCII_FOR = {
-    "—": "-",  # em dash
-    "–": "-",  # en dash
-    "·": "-",  # middle dot
-    "→": "->",  # rightwards arrow
-    "←": "<-",
-    "─": "-",  # box drawing horizontal
-    "✓": "ok",  # check mark
-    "‘": "'",
-    "’": "'",
-    "“": '"',
-    "”": '"',
-    "…": "...",
+    "\u2014": "-",  # em dash
+    "\u2013": "-",  # en dash
+    "\u00b7": "-",  # middle dot
+    "\u2192": "->",  # rightwards arrow
+    "\u2190": "<-",
+    "\u2500": "-",  # box drawing horizontal
+    "\u2713": "ok",  # check mark
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
 }
 
 

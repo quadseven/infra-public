@@ -121,11 +121,11 @@ class Parsing(unittest.TestCase):
 
 class Ascii(unittest.TestCase):
     def test_known_punctuation_is_spelled_in_ascii(self):
-        self.assertEqual(to_ascii("a — b · c → d", "x"), "a - b - c -> d")
+        self.assertEqual(to_ascii("a \u2014 b \u00b7 c \u2192 d", "x"), "a - b - c -> d")
 
     def test_unknown_non_ascii_is_an_error(self):
         with self.assertRaises(ParseError):
-            to_ascii("café", "x")
+            to_ascii("caf\u00e9", "x")
 
 
 class Coverage(unittest.TestCase):
