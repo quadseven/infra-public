@@ -34,7 +34,7 @@ jobs:
       pages: write
       id-token: write
     with:
-      artifact_path: examples
+      artifact_path: examples/deploy-pages
       dry_run: true
 
   assert:
