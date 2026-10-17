@@ -1,0 +1,35 @@
+name: check - deploy.k8s guard steps
+
+# deploy.k8s.yml needs a cluster and a registry, so it cannot run end to end
+# here. Its preflight refusals and image-pin sentinel are plain bash, and
+# deploy_k8s_steps_test.py runs them as written in the workflow file
+# (infra-public#139).
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/deploy.k8s.yml"
+      - ".github/workflows/check.deploy-k8s.yml"
+      - ".github/scripts/deploy_k8s_steps_test.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy.k8s.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Run the deploy.k8s guard steps under bash"
+        run: python3 .github/scripts/deploy_k8s_steps_test.py
