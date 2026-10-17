@@ -164,6 +164,16 @@ class RepoPage(unittest.TestCase):
     def test_the_committed_page_matches_the_workflows(self):
         self.assertEqual(reusable_docs.main(["--check"]), 0)
 
+    def test_the_readme_names_every_reusable(self):
+        # infra-public#138: a reusable missing from the README is one a
+        # stranger landing on the repo does not know exists.
+        readme = (reusable_docs.REPO_ROOT / "README.md").read_text()
+        missing = [
+            Path(r.path).name for r in load(reusable_docs.REPO_ROOT)
+            if f"`{Path(r.path).name}`" not in readme
+        ]
+        self.assertEqual(missing, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
