@@ -17,6 +17,9 @@ on:
       - ".github/scripts/workflow_hygiene.py"
       - ".github/scripts/workflow_hygiene_test.py"
       - ".github/scripts/fixtures/**"
+      - ".github/scripts/sync_docs_steps_test.py"
+      - ".github/scripts/check_private_leaks.py"
+      - ".github/scripts/deploy_k8s_steps_test.py"
       - ".github/workflows/check.workflow-hygiene.yml"
   push:
     branches: [main]
@@ -44,3 +47,5 @@ jobs:
         run: python3 .github/scripts/workflow_hygiene_test.py
       - name: "Lint this repo's own workflows"
         run: python3 .github/scripts/workflow_hygiene.py
+      - name: "Run the docs-sync leak-scan steps as written (infra-public#113)"
+        run: python3 .github/scripts/sync_docs_steps_test.py

@@ -31,7 +31,7 @@ names the test files under `.github/scripts/` that exercise its text.
 | [`deploy.k8s.yml`](#deployk8syml) | - | `deploy_k8s_steps_test.py` |
 | [`deploy.pages.yml`](#deploypagesyml) | `canary.deploy-pages.yml` | - |
 | [`ship.python.yml`](#shippythonyml) | `canary.ship-python.yml` | - |
-| [`sync.public-repo-docs.yml`](#syncpublic-repo-docsyml) | - | `workflow_hygiene_test.py` |
+| [`sync.public-repo-docs.yml`](#syncpublic-repo-docsyml) | - | `sync_docs_steps_test.py`, `workflow_hygiene_test.py` |
 
 ## _reusable.leak-scan.yml
 
@@ -352,7 +352,7 @@ Run on PRs by: `canary.ship-python.yml`. Tested by: nothing in this repository.
 
 sync - public-repo docs. Source: [`.github/workflows/sync.public-repo-docs.yml`](../.github/workflows/sync.public-repo-docs.yml).
 
-Run on PRs by: nothing in this repository. Tested by: `.github/scripts/workflow_hygiene_test.py`.
+Run on PRs by: nothing in this repository. Tested by: `.github/scripts/sync_docs_steps_test.py`, `.github/scripts/workflow_hygiene_test.py`.
 
 ### Inputs
 

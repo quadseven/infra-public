@@ -147,6 +147,10 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # The commit the sync branch starts from, so the scan below diffs
+          # exactly the sync commit. Not github.event.repository: a schedule
+          # event's payload carries no repository object.
+          git rev-parse HEAD > ../sync-base.txt
           git add AGENTS.md CLAUDE.md
           if git diff --cached --quiet; then
             echo "nothing staged after add - already in sync"
@@ -196,14 +200,18 @@ jobs:
         working-directory: target
         env:
           SCANNER: ${{ github.workspace }}/scanner/.github/scripts/check_private_leaks.py
-          BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           if [ ! -s "$SCANNER" ]; then
             echo "::error::the leak scanner was not fetched; refusing to publish the sync PR"
             exit 1
           fi
-          python3 "$SCANNER" --diff "$BASE_REF...HEAD" --text-file ../pr-text.txt
+          # Two calls: --diff and --text-file are mutually exclusive in the
+          # scanner, so one call naming both is a usage error (exit 2) that
+          # would refuse every sync, clean or not (infra-public#113).
+          base=$(cat ../sync-base.txt)
+          python3 "$SCANNER" --diff "$base...HEAD"
+          python3 "$SCANNER" --text-file ../pr-text.txt
 
       - name: Open sync PR
         if: steps.diff.outputs.changed == 'true'
