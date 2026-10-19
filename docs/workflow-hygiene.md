@@ -70,6 +70,39 @@ canonical script to recheck them.
   Node-20. The comment is reduced to its bare major before the lookup, so
   `# v4.2.2` cannot evade the `{"v4"}` table (#72, same failure mode as #64).
 
+## File scope
+
+Which files the port reads is ledgered the same way as the rule numbers
+(infra-public#156): two constants beside `SKIPPED_RULES`, and
+`lint_targets()` as the code that builds the file list.
+
+- `SCANNED_TREES` - canonical trees this copy lints, and what it runs on them.
+- `UNSCANNED_TREES` - canonical trees it does not, each with its reason.
+
+Scanned:
+
+- `.github/workflows/*.yml` - every rule in `lint_file`, plus Rule 11.
+- `.github/actions/**/action.yml` - composite actions get `lint_file`
+  (Rules 1, 1b, 5 and 9; Rules 7, 8 and 12 are job-level and only apply to
+  workflows) plus Rule 11. Before #156 they got Rule 11 only.
+- `.github/scripts/**/*.sh` and `.github/actions/**/*.sh` - Rules 1, 5 and 6,
+  through one sweep of every `.sh` under `.github/` (the parity fixtures
+  under `.github/scripts/fixtures/` are excluded on purpose).
+
+Not scanned:
+
+- `production/**/*.sh` and `pulumi/**/*.sh` - the canonical repo also bounds
+  curl in shell scripts under two deploy trees of its own. That is its
+  layout, not a fleet convention; no repo that pins this port has either
+  tree.
+
+`workflow_hygiene_test.py` fails if a canonical tree is in neither constant
+or in both, if `lint_targets()` reaches a tree the ledger calls unscanned or
+misses one it calls scanned, or if a tree is not named on this page. The
+`fixtures/scope_parity/` corpus is a small repo tree holding one composite
+`action.yml` with a floating `uses:` and an unbounded `curl`; the port and
+the canonical linter both flag its lines 10 and 12.
+
 ## Keeping the two in sync
 
 There is no automated sync between the two copies. When a shared rule
