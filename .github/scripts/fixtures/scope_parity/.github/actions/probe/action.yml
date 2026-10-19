@@ -1,0 +1,13 @@
+# parity-case: a composite action is linted like a workflow (infra-public#156)
+# canonical-scope-lines: 10,12
+# Line 10 breaks Rule 1 (floating tag), line 12 breaks Rule 5 (unbounded curl).
+name: probe
+description: Composite action with one Rule 1 and one Rule 5 violation.
+runs:
+  using: composite
+  steps:
+    - name: checkout
+      uses: actions/checkout@v4
+    - name: fetch
+      run: curl -fsSL -o /tmp/x https://example.invalid/
+      shell: bash

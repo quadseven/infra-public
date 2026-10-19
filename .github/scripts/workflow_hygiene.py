@@ -18,8 +18,15 @@ SKIPPED_RULES below. Every canonical rule number (1 through
 CANONICAL_RULE_COUNT) is in exactly one of IMPLEMENTED_RULES and
 SKIPPED_RULES, and workflow_hygiene_test.py fails if one is in neither.
 
+File scope is ledgered the same way. Every tree the canonical linter scans
+is in exactly one of SCANNED_TREES and UNSCANNED_TREES (with its reason),
+lint_targets() builds the file list from the scanned ones, and
+workflow_hygiene_test.py fails if the ledger and lint_targets() disagree.
+Composite actions (.github/actions/**/action.yml) get lint_file, not only
+Rule 11 (infra-public#156).
+
 Fixtures under .github/scripts/fixtures/ record canonical verdicts for
-rules 5, 8, 11, and 12. Set CANONICAL_HYGIENE_LINTER to a local copy of
+rules 5, 8, 11, and 12, and for the action.yml scope (scope_parity/). Set CANONICAL_HYGIENE_LINTER to a local copy of
 the canonical script to recheck those recorded verdicts.
 
 Run: python3 .github/scripts/workflow_hygiene.py
@@ -64,6 +71,47 @@ SKIPPED_RULES: dict[int, str] = {
     # an input its caller picks, so there is no pool here to keep pushes off.
     13: "no shared private runner pool",
 }
+
+# File scope, ledgered like the rule numbers above (infra-public#156). The
+# canonical linter scans the trees listed here; each one is in exactly one of
+# SCANNED_TREES (what this port does with it) and UNSCANNED_TREES (why not).
+# lint_targets() is the code side; workflow_hygiene_test.py fails when a tree
+# is in neither dict, in both, or when lint_targets() reaches a tree the
+# ledger says it skips (or misses one it says it scans).
+SCANNED_TREES: dict[str, str] = {
+    ".github/workflows/*.yml": "lint_file (rules 1, 1b, 5, 7, 8, 9, 12) and Rule 11",
+    ".github/actions/**/action.yml": "lint_file (rules 1, 1b, 5, 9) and Rule 11",
+    ".github/scripts/**/*.sh": "lint_file (rules 1, 5, 6), via the .github/**/*.sh sweep",
+    ".github/actions/**/*.sh": "lint_file (rules 1, 5, 6), via the .github/**/*.sh sweep",
+}
+UNSCANNED_TREES: dict[str, str] = {
+    # The canonical repo also bounds curl (Rule 5) in shell scripts under two
+    # deploy trees of its own. Those are that repo's layout, not a fleet
+    # convention: this repo and the repos that pin this port have neither tree.
+    "production/**/*.sh": "canonical-repo deploy tree; no consumer of this port has one",
+    "pulumi/**/*.sh": "canonical-repo IaC tree; no consumer of this port has one",
+}
+
+
+def lint_targets(root: Path = Path(".")) -> list[Path]:
+    """Every file lint_file runs over, relative to `root` (the repo root).
+
+    Workflows, composite-action metadata, and every `.sh` under `.github/`
+    except the parity fixtures, which hold deliberately bad cases.
+    """
+    wf_dir, actions_dir = root / WF_DIR, root / ACTIONS_DIR
+    github_dir, fixtures_dir = root / GITHUB_DIR, root / FIXTURES_DIR
+    targets: list[Path] = []
+    if wf_dir.is_dir():
+        targets.extend(sorted(wf_dir.glob("*.yml")))
+    if actions_dir.is_dir():
+        targets.extend(sorted(actions_dir.glob("**/action.yml")))
+    if github_dir.is_dir():
+        targets.extend(
+            p for p in sorted(github_dir.rglob("*.sh")) if fixtures_dir not in p.parents
+        )
+    return targets
+
 
 # Local composites (./.github/actions/...) and same-repo reusables have no
 # pinning concern; only owner/repo@ref refs are checked. `['"]?` before the
@@ -634,22 +682,13 @@ def lint_file(path: Path) -> list[str]:
 
 
 def main() -> int:
-    targets: list[Path] = []
-    if WF_DIR.is_dir():
-        targets.extend(sorted(WF_DIR.glob("*.yml")))
-    if GITHUB_DIR.is_dir():
-        # The parity corpora hold deliberately bad cases (some `.sh`): test
-        # data, not scripts this repo runs.
-        targets.extend(
-            p for p in sorted(GITHUB_DIR.rglob("*.sh")) if FIXTURES_DIR not in p.parents
-        )
+    targets = lint_targets()
 
     all_errors: list[str] = []
     for path in targets:
         all_errors.extend(lint_file(path))
-    pin_errors, pin_summary = lint_pin_labels(
-        sorted(WF_DIR.glob("*.yml")) + sorted(ACTIONS_DIR.glob("**/action.yml"))
-    )
+    # Rule 11 reads the same workflows and action.yml files lint_file does.
+    pin_errors, pin_summary = lint_pin_labels([p for p in targets if p.suffix == ".yml"])
     all_errors.extend(pin_errors)
     print(pin_summary)
 

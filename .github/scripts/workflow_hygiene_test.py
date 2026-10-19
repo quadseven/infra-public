@@ -25,7 +25,9 @@ from pathlib import Path
 from workflow_hygiene import (
     CANONICAL_RULE_COUNT,
     IMPLEMENTED_RULES,
+    SCANNED_TREES,
     SKIPPED_RULES,
+    UNSCANNED_TREES,
     lint_branch_switch_local_action,
     lint_curl_timeouts,
     lint_file,
@@ -33,6 +35,7 @@ from workflow_hygiene import (
     lint_job_timeouts,
     lint_pin_labels,
     lint_shell_script,
+    lint_targets,
     lint_template_injection,
     main,
     skipped_rules_label,
@@ -735,6 +738,120 @@ class TemplateInjection(unittest.TestCase):
             self.assertTrue(any("github.event.issue.title" in e for e in lint_file(path)))
         finally:
             path.unlink()
+
+
+# --- File scope, ledgered like the rule numbers (infra-public#156) ---------
+#
+# The trees the canonical linter's main() scans, recorded from it: workflows
+# and composite-action metadata go through lint_file, shell scripts under
+# .github/scripts, .github/actions and two canonical-repo deploy trees go
+# through the shell and curl checks. Each one must be in exactly one of
+# SCANNED_TREES and UNSCANNED_TREES.
+CANONICAL_TREES = {
+    ".github/workflows/*.yml",
+    ".github/actions/**/action.yml",
+    ".github/scripts/**/*.sh",
+    ".github/actions/**/*.sh",
+    "production/**/*.sh",
+    "pulumi/**/*.sh",
+}
+
+# One file per canonical tree, so lint_targets() can be checked tree by tree
+# against the ledger without a glob matcher.
+TREE_PROBES = {
+    ".github/workflows/w.yml": ".github/workflows/*.yml",
+    ".github/actions/a/nested/action.yml": ".github/actions/**/action.yml",
+    ".github/scripts/s.sh": ".github/scripts/**/*.sh",
+    ".github/actions/a/run.sh": ".github/actions/**/*.sh",
+    "production/p.sh": "production/**/*.sh",
+    "pulumi/q.sh": "pulumi/**/*.sh",
+}
+
+SCOPE_FIXTURE_ROOT = FIXTURES_DIR / "scope_parity"
+
+
+class ScopeLedger(unittest.TestCase):
+    def test_every_canonical_tree_is_scanned_or_unscanned(self):
+        scanned, unscanned = set(SCANNED_TREES), set(UNSCANNED_TREES)
+        self.assertEqual(sorted(CANONICAL_TREES - scanned - unscanned), [])
+        self.assertEqual(sorted(scanned & unscanned), [])
+        self.assertEqual(sorted((scanned | unscanned) - CANONICAL_TREES), [])
+        self.assertTrue(all(SCANNED_TREES.values()))
+        self.assertTrue(all(UNSCANNED_TREES.values()))
+
+    def test_the_probes_cover_every_canonical_tree(self):
+        self.assertEqual(set(TREE_PROBES.values()), CANONICAL_TREES)
+
+    def test_lint_targets_reaches_exactly_the_scanned_trees(self):
+        # The code side of the ledger: a tree the ledger calls scanned must be
+        # reached, and a tree it calls unscanned must not be.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for rel in TREE_PROBES:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("set -e\n")
+            fixture_sh = root / ".github/scripts/fixtures/x/bad.sh"
+            fixture_sh.parent.mkdir(parents=True)
+            fixture_sh.write_text("curl https://example.invalid/\n")
+            targets = {p.relative_to(root).as_posix() for p in lint_targets(root)}
+        reached = {TREE_PROBES[t] for t in targets if t in TREE_PROBES}
+        print(
+            f"scope ledger: {len(reached)} of {len(CANONICAL_TREES)} canonical trees reached",
+            file=sys.stderr,
+        )
+        self.assertEqual(sorted(reached), sorted(SCANNED_TREES))
+        self.assertEqual(sorted(targets - set(TREE_PROBES)), [])
+
+    def test_the_docs_state_the_scope(self):
+        doc = (Path(__file__).parents[2] / "docs/workflow-hygiene.md").read_text()
+        for tree in CANONICAL_TREES:
+            with self.subTest(tree=tree):
+                self.assertIn(f"`{tree}`", doc)
+
+
+class ScopeParity(unittest.TestCase):
+    """A composite action.yml is linted like a workflow, as canonical does."""
+
+    def _recorded(self) -> tuple[Path, tuple[int, ...]]:
+        path = SCOPE_FIXTURE_ROOT / ".github/actions/probe/action.yml"
+        m = re.search(r"^# canonical-scope-lines:\s*(.+?)\s*$", path.read_text(), re.M)
+        self.assertIsNotNone(m, f"{path}: no `# canonical-scope-lines:` header")
+        return path, tuple(int(x) for x in m.group(1).split(","))
+
+    def _run_main_in_fixture(self, run) -> str:
+        out = io.StringIO()
+        before = Path.cwd()
+        os.chdir(SCOPE_FIXTURE_ROOT)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                self.code = run()
+        finally:
+            os.chdir(before)
+        return out.getvalue()
+
+    def test_the_port_lints_the_fixture_action_as_canonical_does(self):
+        path, expected = self._recorded()
+        targets = lint_targets(SCOPE_FIXTURE_ROOT)
+        self.assertEqual(targets, [path])
+        errors = [e for t in targets for e in lint_file(t)]
+        self.assertEqual(_flagged_lines(errors), expected, errors)
+        # Line 10 is Rule 1's message, line 12 is Rule 5's.
+        self.assertTrue(any("unpinned action `actions/checkout@v4`" in e for e in errors))
+        self.assertTrue(any("curl missing" in e for e in errors))
+
+    def test_main_exits_1_on_the_fixture_tree(self):
+        out = self._run_main_in_fixture(main)
+        self.assertEqual(self.code, 1, out)
+        self.assertIn("2 violation(s) in 1 files checked", out)
+
+    def test_the_recorded_verdict_matches_the_live_canonical_linter(self):
+        canon = _load_canonical()
+        if canon is None:
+            self.skipTest("CANONICAL_HYGIENE_LINTER unset - recorded verdict stands in")
+        _, expected = self._recorded()
+        out = self._run_main_in_fixture(canon.main)
+        errors = [ln for ln in out.splitlines() if ln.startswith("::error::")]
+        self.assertEqual(_flagged_lines(errors), expected, out)
 
 
 if __name__ == "__main__":
