@@ -53,7 +53,7 @@ USAGE
     check_private_leaks.py --diff BASE...HEAD           # CI: a PR's diff
     check_private_leaks.py --text-file body.md          # an issue/PR body
     check_private_leaks.py --tree                       # every tracked file
-    check_private_leaks.py --diff A...B --allow-repo-ref my-repo
+    check_private_leaks.py --diff A...B --allow-repo-ref my-org/my-repo
     check_private_leaks.py --text-file b.md --deny-list-ssm /path/to/param
 
 FULL-TREE MODE (--tree)
@@ -75,7 +75,9 @@ guard that existed in the fleet, and keeps its pattern semantics. Three
 deliberate differences, all needed to make one script serve every repo:
 
   1. The "this repo's own issue refs are fine" exemption was hardcoded to one
-     repo name. It is now --allow-repo-ref, supplied by the caller.
+     repo name. It is now --allow-repo-ref, supplied by the caller, and exempts
+     exactly the repo named: `<owner>/<repo>` covers that repo's qualified and
+     bare refs, a bare `<repo>` only its bare refs.
   2. The cross-repo-ref pattern missed the FULLY-QUALIFIED form (`<owner>/<repo>#1`
      slipped past the lookbehind entirely), which is the more revealing of the
      two. It now matches both forms.
@@ -178,9 +180,10 @@ PATTERNS: list[tuple[str, str, str]] = [
 ]
 
 # The cross-repo-ref rule is not in PATTERNS because it is not a constant: the
-# caller's allow-list is spliced into it per run. Repos named there may be
-# referenced as `<repo>#123`/`<owner>/<repo>#123`; anything else in that shape is
-# treated as possibly naming a private repo. A bare `#123` is always this repo's
+# caller's allow-list is spliced into it per run. An `<owner>/<repo>` entry may
+# be referenced as `<owner>/<repo>#123` or `<repo>#123`, a bare `<repo>` entry
+# only as `<repo>#123`; anything else in that shape is treated as possibly
+# naming a private repo. A bare `#123` is always this repo's
 # own issue and is never matched.
 REPO_REF_WHY = "a cross-repo issue reference (may name a private repo)"
 
@@ -197,15 +200,27 @@ def repo_ref_pattern(allowed: list[str]) -> str:
     The final char before `#` must be alphanumeric: prose like "Post-#77" is a
     hyphenated word followed by THIS repo's issue number, not a repo reference,
     and that shape was 91 of the first 99 hits when the rule was first written.
+
+    An allowed entry exempts exactly that repo. `<owner>/<repo>` exempts
+    `<owner>/<repo>#1` and bare `<repo>#1`; a bare `<repo>` exempts only bare
+    `<repo>#1`. The exemption is a lookahead at the start of the WHOLE ref,
+    owner included, that must reach the `#`: anchored after the owner and
+    ended with `\\b`, `<repo>` also exempted `<repo>-anything#1` and
+    `<other>/<repo>#1`, and `<owner>/<repo>` exempted nothing.
     """
+    forms: set[str] = set()
+    for entry in allowed:
+        forms.add(entry)
+        if "/" in entry:
+            forms.add(entry.split("/", 1)[1])
     exempt = ""
-    if allowed:
-        exempt = "(?!(?:%s)\\b)" % "|".join(re.escape(a) for a in sorted(allowed))
+    if forms:
+        exempt = "(?!(?:%s)#)" % "|".join(re.escape(f) for f in sorted(forms))
     return (
         r"(?<![\w/-])"  # not mid-word, not the tail of a path
-        r"(?:[a-z0-9][a-z0-9._-]*/)?"  # optional owner/ prefix
         + exempt
-        + r"[a-z][a-z0-9_]*(?:-[a-z0-9]+)*[a-z0-9]#\d+\b"
+        + r"(?:[a-z0-9][a-z0-9._-]*/)?"  # optional owner/ prefix
+        r"[a-z][a-z0-9_]*(?:-[a-z0-9]+)*[a-z0-9]#\d+\b"
     )
 
 
@@ -499,9 +514,10 @@ def main() -> int:
         "--allow-repo-ref",
         action="append",
         default=[],
-        metavar="NAME",
-        help="repo name whose `<name>#123` refs are fine (repeatable); "
-        "callers pass at least their own repo's name",
+        metavar="[OWNER/]NAME",
+        help="repo whose issue refs are fine (repeatable): `<owner>/<name>` "
+        "exempts `<owner>/<name>#123` and `<name>#123`, a bare `<name>` only "
+        "`<name>#123`; callers pass at least their own repo",
     )
     ap.add_argument(
         "--require-changes",

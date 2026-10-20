@@ -46,7 +46,8 @@ from check_private_leaks import (
 )
 
 SCRIPT = Path(__file__).with_name("check_private_leaks.py")
-RULES = build_patterns(["infra-public"])
+# Owner-qualified, as the reusable workflow passes the calling repo.
+RULES = build_patterns(["quadseven/infra-public"])
 
 
 def hits(text: str, *, diff_mode: bool = False, rules=None) -> list[str]:
@@ -188,6 +189,29 @@ class CrossRepoRefs(unittest.TestCase):
         rules = build_patterns(["infra-public", "USER"])
         self.assertEqual(hits("pk USER#100", rules=rules), [])  # leak-guard-allow: fixture
         self.assertIn("private-issue-ref", hits("pk USER#100")[0])  # leak-guard-allow: fixture
+
+    def test_qualified_allow_entry_exempts_exactly_that_repo(self):
+        # OWNER/NAME exempts that repo in both forms, and nothing that only
+        # starts with its name or carries it under another owner: a private
+        # `<name>-...` repo can sit beside a public one.
+        rules = build_patterns(["acme/widget"])
+        for text in ("see acme/widget#5", "see widget#5", "see ACME/Widget#5"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertEqual(hits(text, rules=rules), [])
+        for text in ("see widget-api#5", "see other/widget#5",  # leak-guard-allow: fixture
+                     "see acme/widget-api#5", "see someplace#12"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertIn("private-issue-ref", hits(text, rules=rules)[0])
+
+    def test_bare_allow_entry_exempts_only_the_bare_ref(self):
+        rules = build_patterns(["widget"])
+        for text in ("see widget#5", "see Widget#5"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertEqual(hits(text, rules=rules), [])
+        for text in ("see widget-api#5", "see other/widget#5",  # leak-guard-allow: fixture
+                     "see someplace#12"):  # leak-guard-allow: fixture
+            with self.subTest(text=text):
+                self.assertIn("private-issue-ref", hits(text, rules=rules)[0])
 
     def test_bare_issue_number_is_clean(self):
         self.assertEqual(hits("closes #123"), [])

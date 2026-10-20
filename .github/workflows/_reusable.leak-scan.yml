@@ -144,7 +144,7 @@ on:
         type: string
         default: "pr"
       allowed-repo-refs:
-        description: "Comma-separated repo names whose `<name>#123` refs are fine. The calling repo's own name is always allowed and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
+        description: "Comma-separated repos whose issue refs are fine. An `<owner>/<name>` entry exempts `<owner>/<name>#123` and `<name>#123`; a bare `<name>` exempts only `<name>#123`. The calling repo is always allowed in both forms and need not be listed. Everything else in that shape is treated as possibly naming a private repo."
         required: false
         type: string
         default: ""
@@ -371,9 +371,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This repo's own `<name>#123` refs are always fine; anything else in
-          # that shape may be naming a private repo.
-          args=(--allow-repo-ref "${OWN_REPO#*/}")
+          # This repo's own `<owner>/<name>#123` and `<name>#123` refs are
+          # always fine; anything else in that shape may be naming a private
+          # repo. Owner-qualified, since a bare name exempts only bare refs.
+          args=(--allow-repo-ref "$OWN_REPO")
           while IFS= read -r name; do
             name="${name//[[:space:]]/}"     # tolerate "a, b" as well as "a,b"
             if [ -n "$name" ]; then
