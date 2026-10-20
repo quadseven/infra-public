@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parents[1] / "workflows" / "_reusable.leak-scan.yml"
+SCANNER = Path(__file__).resolve().parent / "check_private_leaks.py"
 STEP_RE = re.compile(r"^(\s*)- name:\s*(.+?)\s*$")
 
 
@@ -61,10 +62,12 @@ FAKE_GH = r"""#!/usr/bin/env bash
 # Logs each call; a GET of the comments list prints the canned comments.
 printf '%s\0' "$@" >> "$GH_LOG"; printf '\036' >> "$GH_LOG"
 if [ "$1" = api ] && [[ " $* " != *" -X "* ]] && [[ "$*" == *"/comments"* ]]; then
+  if [ -n "${GH_LIST_FAILS:-}" ]; then echo "HTTP 502" >&2; exit 1; fi
   cat "$GH_COMMENTS"
 fi
 """
 
+COMMENT_STEP = "9."
 BOT = "github-actions[bot]"
 FINDING_OUTPUT = """BLOCKED: private infrastructure identifiers found (9 shape patterns)
 
@@ -75,7 +78,9 @@ This repo is PUBLIC.
 """
 
 
-@unittest.skipUnless(shutil.which("jq"), "jq is on the runner; install it to run this here")
+# Never skipped in CI (CI=true on every Actions runner): a skip there would
+# report green over tests that did not run.
+@unittest.skipIf(shutil.which("jq") is None and not os.environ.get("CI"), "jq is on the runner; install it to run this here")
 class IssueComment(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="leak-scan-step-"))
@@ -91,10 +96,17 @@ class IssueComment(unittest.TestCase):
         self.scan = self.tmp / "text-scan.txt"
         self.path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"
 
-    def run_step(self, worst: str, comments: list[dict], scan_output: str = "") -> list[list[str]]:
+    def run_step(self, worst: str, comments: list[dict], scan_output: str = "", **env: str) -> list[list[str]]:
+        done, writes = self.attempt(worst, comments, scan_output, **env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return writes
+
+    def attempt(
+        self, worst: str, comments: list[dict], scan_output: str = "", **env: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         self.comments.write_text(json.dumps(comments))
         self.scan.write_text(scan_output.format(path=self.tmp / "text.md"))
-        _, script = step("9.")
+        _, script = step(COMMENT_STEP)
         done = subprocess.run(
             ["bash", "-e", "-c", script],
             env={
@@ -107,15 +119,15 @@ class IssueComment(unittest.TestCase):
                 "WORST": worst,
                 "SCAN_OUTPUT": str(self.scan),
                 "RUN_URL": "https://github.com/owner/public-repo/actions/runs/1",
+                **env,
             },
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         )
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         calls = [c.split("\0")[:-1] for c in self.log.read_text().split("\036") if c]
-        return [c for c in calls if not (c[0] == "api" and "-X" not in c)]
+        return done, [c for c in calls if not (c[0] == "api" and "-X" not in c)]
 
     def body_of(self, call: list[str]) -> str:
         for i, arg in enumerate(call):
@@ -125,19 +137,43 @@ class IssueComment(unittest.TestCase):
                 return arg[len("body="):]
         raise AssertionError(f"no body in {call}")
 
-    def test_the_comment_names_each_flagged_line(self):
+    def test_the_comment_names_each_flagged_line_and_rule(self):
         writes = self.run_step("1", [], FINDING_OUTPUT)
         self.assertEqual(len(writes), 1, writes)
         body = self.body_of(writes[0])
-        self.assertIn("title: [private-issue-ref] 'other-repo#N'", body)
-        self.assertIn("body line 3: [deny-list] <redacted, 6 chars>", body)
+        self.assertIn("title: private-issue-ref\n", body)
+        self.assertIn("body line 3: deny-list\n", body)
+        self.assertIn("https://github.com/owner/public-repo/actions/runs/1", body)
 
-    def test_a_flagged_line_is_quoted_in_a_code_block_so_nothing_links(self):
+    def test_the_comment_never_repeats_the_matched_text(self):
         body = self.body_of(self.run_step("1", [], FINDING_OUTPUT)[0])
-        block = body.split("```")
-        self.assertGreaterEqual(len(block), 3, body)
-        self.assertIn("other-repo#N", block[1])
-        self.assertNotIn("other-repo#N", block[0] + block[2])
+        self.assertNotIn("other-repo", body)
+        self.assertNotIn("redacted", body)
+
+    def test_the_real_scanner_output_is_read_line_by_line(self):
+        # Built at run time so this file's own diff carries no reference.
+        ref = "other" + "-repo#" + "12"
+        text = self.tmp / "text.md"
+        text.write_text(f"A title\nfirst line\nsee {ref}\n")
+        scanned = subprocess.run(
+            ["python3", str(SCANNER), "--text-file", str(text), "--allow-repo-ref", "owner/public-repo"],
+            # Both streams, as step 8's `2>&1` keeps them: findings go to stderr.
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(scanned.returncode, 1, scanned.stdout)
+        body = self.body_of(self.run_step("1", [], scanned.stdout.replace("{", "{{").replace("}", "}}"))[0])
+        self.assertIn("body line 2: private-issue-ref\n", body)
+        self.assertNotIn(ref, body)
+
+    def test_step_8_keeps_both_scanner_streams_for_step_9(self):
+        _, script = step("8.")
+        self.assertRegex(script, r'--text-file "\$RUNNER_TEMP/text.md".*> "\$RUNNER_TEMP/text-scan.txt" 2>&1')
+        self.assertIn('echo "textscan=$RUNNER_TEMP/text-scan.txt"', script)
+
+    def test_a_failed_comment_listing_fails_the_step_and_posts_nothing(self):
+        done, writes = self.attempt("1", [], FINDING_OUTPUT, GH_LIST_FAILS="1")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(writes, [])
 
     def test_a_second_finding_edits_the_earlier_comment_instead_of_mailing_again(self):
         earlier = {"id": 55, "user": {"login": BOT}, "body": "<!-- leak-scan:issue-text -->\nold"}
@@ -164,11 +200,11 @@ class IssueComment(unittest.TestCase):
         self.assertEqual(writes, [])
 
     def test_the_step_runs_on_clean_and_finding_issue_scans_but_not_on_scan_failure(self):
-        cond, _ = step("9.")
+        cond, _ = step(COMMENT_STEP)
         self.assertIn("github.event_name == 'issues'", cond)
         self.assertIn("steps.scan.outputs.worst == '0'", cond)
         self.assertIn("steps.scan.outputs.worst == '1'", cond)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

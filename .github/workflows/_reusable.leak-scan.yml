@@ -20,8 +20,10 @@ name: _reusable · Leak scan (PR diff + PR/issue text, or full tree)
 #   diff and no PR to gate. An `issues` event has no code and no merge to
 #   block, so a finding here cannot fail a check the way a PR's does - instead
 #   it is posted back as a comment on the issue itself (step 9), which is the
-#   closest equivalent to the `::error::` annotation a PR finding gets. The
-#   workflow run still goes red for anyone auditing Actions history.
+#   closest equivalent to the `::error::` annotation a PR finding gets. That
+#   comment names each flagged line, is edited in place by a later scan and
+#   deleted by a clean one. The workflow run still goes red for anyone
+#   auditing Actions history.
 #
 # WHAT IT SCANS. The PR diff (PR events only) AND the PR/issue title+body. The
 #   text half is not incidental - most of what this exists to stop was written
@@ -453,13 +455,19 @@ jobs:
           marker='<!-- leak-scan:issue-text -->'
           # This step's own comments, by marker, and the unmarked warnings
           # earlier versions posted, so an old issue converges on one too.
-          mapfile -t ids < <(
-            gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments" |
-              jq -r --arg m "$marker" '.[]
-                | select(.user.login == "github-actions[bot]")
-                | select((.body | startswith($m)) or (.body | startswith(":warning: **Leak scan found")))
-                | .id'
-          )
+          # In a command substitution, not `< <(...)`: set -e never sees a
+          # failure inside a process substitution, and a listing that failed
+          # unseen would post a duplicate or leave a stale warning.
+          listing=$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments")
+          found=$(printf '%s' "$listing" |
+            jq -r --arg m "$marker" '.[]
+              | select(.user.login == "github-actions[bot]")
+              | select((.body | startswith($m)) or (.body | startswith(":warning: **Leak scan found")))
+              | .id')
+          ids=()
+          if [ -n "$found" ]; then
+            mapfile -t ids <<< "$found"
+          fi
 
           if [ "$WORST" = "0" ]; then
             for id in "${ids[@]}"; do
@@ -469,16 +477,18 @@ jobs:
           fi
 
           # Scanner lines look like "  <file>:<line>  [<rule>] <match> - <why>".
-          # text.md is the title on line 1 and the body after it. A deny-list
-          # match arrives already redacted, so nothing here echoes one.
+          # text.md is the title on line 1 and the body after it. Only the
+          # line and rule reach the comment, never the match: a comment is
+          # mailed to every subscriber and keeps its edit history, so quoting
+          # the match would spread the very text the filer is about to remove.
+          # The match stays in the run log.
           findings=""
-          re='^  [^ ]+:([0-9]+)  (\[.*)$'
+          re='^  [^ ]+:([0-9]+)  \[([A-Za-z0-9_-]+)\] '
           while IFS= read -r line; do
             if [[ $line =~ $re ]]; then
               n=${BASH_REMATCH[1]}
-              what=${BASH_REMATCH[2]//\`/}
               if [ "$n" = 1 ]; then where="title"; else where="body line $((n - 1))"; fi
-              findings+="${where}: ${what}"$'\n'
+              findings+="${where}: ${BASH_REMATCH[2]}"$'\n'
             fi
           done < "$SCAN_OUTPUT"
           if [ -z "$findings" ]; then
@@ -488,9 +498,7 @@ jobs:
           # shellcheck disable=SC2016  # single-quoted on purpose: the backticks are literal markdown, nothing here should expand
           intro=':warning: **Leak scan found a possible private-infrastructure identifier in the title or body of this issue.**'
           # shellcheck disable=SC2016  # as above
-          advice='This repo is public - see `templates/public-repo/AGENTS.md`. Edit the issue to describe each one generically (by role, not by hostname/repo-name/person), or mark a deliberate, reviewed exception with `leak-guard-allow` on that line. Editing the issue re-runs this check; this comment updates in place and goes away once the issue scans clean.'
-          # The flagged text sits in a code block, so a repo reference in it
-          # does not link and a handle in it does not notify anyone.
+          advice='This repo is public - see `templates/public-repo/AGENTS.md`. The matched text is in the run log linked below. Edit the issue to describe each one generically (by role, not by hostname/repo-name/person), or mark a deliberate, reviewed exception with `leak-guard-allow` on that line. Editing the issue re-runs this check; this comment updates in place and goes away once the issue scans clean.'
           msg="${marker}
           ${intro}
 
