@@ -106,8 +106,8 @@ name: _reusable · Leak scan (PR diff + PR/issue text, or full tree)
 #   jobs:
 #     leak-scan:
 #       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
-#       # issues: write is ONLY used on an `issues` event, to comment a finding
-#       # back onto the issue (there is no check to fail on an issue). A
+#       # issues: write is ONLY used on an `issues` event, to keep one finding
+#       # comment on the issue (there is no check to fail on an issue). A
 #       # PR-triggered run of the same caller never touches it.
 #       permissions: { contents: read, issues: write }
 #
@@ -415,34 +415,100 @@ jobs:
 
           rc_text=0
           echo "--- title and body ---"
-          python3 "$SCANNER" --text-file "$RUNNER_TEMP/text.md" "${args[@]}" || rc_text=$?
+          # Kept in a file as well, so step 9 can tell an issue's filer which
+          # lines were flagged.
+          python3 "$SCANNER" --text-file "$RUNNER_TEMP/text.md" "${args[@]}" > "$RUNNER_TEMP/text-scan.txt" 2>&1 || rc_text=$?
+          cat "$RUNNER_TEMP/text-scan.txt"
 
           # Exit-code contract (see the scanner's docstring):
           #   0 clean | 1 findings | 2+ could not scan.
           # Only 1 is softenable, and only when the caller asked for warn mode.
           worst=$(( rc_diff > rc_text ? rc_diff : rc_text ))
-          echo "worst=$worst" >> "$GITHUB_OUTPUT"
-          echo "textfile=$RUNNER_TEMP/text.md" >> "$GITHUB_OUTPUT"
+          {
+            echo "worst=$worst"
+            echo "textfile=$RUNNER_TEMP/text.md"
+            echo "textscan=$RUNNER_TEMP/text-scan.txt"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: "9. Comment the finding back onto the issue (issues event only)"
+      - name: "9. Keep one comment on the issue that lists the findings (issues event only)"
         # There is no check to fail on a bare issue, so the finding is posted
         # where the filer (human or automation) will actually see it - the
         # nearest equivalent to the ::error:: annotation a PR finding gets.
-        # Runs only on a real finding (worst == 1), never on a scan failure
+        # Each new comment is an email, so an issue holds at most one: a
+        # rescan that still finds something edits it, a clean rescan deletes
+        # it. It names each flagged line, since a warning that says only
+        # "something" sends the filer hunting. Never runs on a scan failure
         # (worst >= 2): a scanner that could not run has nothing true to say
         # about the issue's content.
-        if: github.event_name == 'issues' && steps.scan.outputs.worst == '1'
+        if: github.event_name == 'issues' && (steps.scan.outputs.worst == '0' || steps.scan.outputs.worst == '1')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          WORST: ${{ steps.scan.outputs.worst }}
+          SCAN_OUTPUT: ${{ steps.scan.outputs.textscan }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2016  # single-quoted on purpose: the backticks are literal markdown, nothing here should expand
-          msg=':warning: **Leak scan found a possible private-infrastructure identifier in the title or body of this issue.**
+          marker='<!-- leak-scan:issue-text -->'
+          # This step's own comments, by marker, and the unmarked warnings
+          # earlier versions posted, so an old issue converges on one too.
+          mapfile -t ids < <(
+            gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments" |
+              jq -r --arg m "$marker" '.[]
+                | select(.user.login == "github-actions[bot]")
+                | select((.body | startswith($m)) or (.body | startswith(":warning: **Leak scan found")))
+                | .id'
+          )
 
-          This repo is public - see `templates/public-repo/AGENTS.md`. Please edit the issue to describe the finding generically (by role, not by hostname/repo-name/person), or mark a deliberate, reviewed exception with `leak-guard-allow` on that line. Re-editing the issue re-runs this check.'
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$msg"
+          if [ "$WORST" = "0" ]; then
+            for id in "${ids[@]}"; do
+              gh api -X DELETE "repos/$REPO/issues/comments/$id" > /dev/null
+            done
+            exit 0
+          fi
+
+          # Scanner lines look like "  <file>:<line>  [<rule>] <match> - <why>".
+          # text.md is the title on line 1 and the body after it. A deny-list
+          # match arrives already redacted, so nothing here echoes one.
+          findings=""
+          re='^  [^ ]+:([0-9]+)  (\[.*)$'
+          while IFS= read -r line; do
+            if [[ $line =~ $re ]]; then
+              n=${BASH_REMATCH[1]}
+              what=${BASH_REMATCH[2]//\`/}
+              if [ "$n" = 1 ]; then where="title"; else where="body line $((n - 1))"; fi
+              findings+="${where}: ${what}"$'\n'
+            fi
+          done < "$SCAN_OUTPUT"
+          if [ -z "$findings" ]; then
+            findings="(no line could be read from the scan; see the run log)"$'\n'
+          fi
+
+          # shellcheck disable=SC2016  # single-quoted on purpose: the backticks are literal markdown, nothing here should expand
+          intro=':warning: **Leak scan found a possible private-infrastructure identifier in the title or body of this issue.**'
+          # shellcheck disable=SC2016  # as above
+          advice='This repo is public - see `templates/public-repo/AGENTS.md`. Edit the issue to describe each one generically (by role, not by hostname/repo-name/person), or mark a deliberate, reviewed exception with `leak-guard-allow` on that line. Editing the issue re-runs this check; this comment updates in place and goes away once the issue scans clean.'
+          # The flagged text sits in a code block, so a repo reference in it
+          # does not link and a handle in it does not notify anyone.
+          msg="${marker}
+          ${intro}
+
+          \`\`\`
+          ${findings}\`\`\`
+
+          ${advice}
+
+          Run: ${RUN_URL}"
+
+          if [ "${#ids[@]}" -gt 0 ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/${ids[0]}" -f body="$msg" > /dev/null
+            for id in "${ids[@]:1}"; do
+              gh api -X DELETE "repos/$REPO/issues/comments/$id" > /dev/null
+            done
+          else
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$msg"
+          fi
 
       - name: "10. Enforce the result"
         env:
