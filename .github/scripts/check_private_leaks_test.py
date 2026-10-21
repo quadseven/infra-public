@@ -430,9 +430,10 @@ class CliAgainstRealGit(unittest.TestCase):
         return subprocess.run(["git", "-C", str(cls.repo), *args], check=True,
                               capture_output=True, text=True, env=env).stdout
 
-    def _cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _cli(self, *args: str, repo_env: str = "") -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(SCRIPT), *args],
-                              cwd=self.repo, capture_output=True, text=True)
+                              cwd=self.repo, capture_output=True, text=True,
+                              env=_scan_env(repo_env))
 
     def test_seeded_leak_exits_1(self):
         out = self._cli("--diff", f"{self.base}...{self.head}")
@@ -480,9 +481,45 @@ class CliAgainstRealGit(unittest.TestCase):
             self._cli("--text-file", str(body),
                       "--allow-repo-ref", "infra-public").returncode, 0)
 
+    def test_the_actions_repository_is_its_own_repo_in_both_forms(self):
+        # A caller pinned to a reusable that passed only the bare name had
+        # every owner-qualified ref to itself flagged once a bare name stopped
+        # covering them (2026-10-20). Actions names the caller's repo in
+        # GITHUB_REPOSITORY, which no pull request can set.
+        body = self.repo / "ref.md"
+        body.write_text("Refs my-org/infra-public#46\n")  # leak-guard-allow: fixture
+        self.assertEqual(self._cli("--text-file", str(body), "--allow-repo-ref", "infra-public").returncode, 1)
+        self.assertEqual(self._cli("--text-file", str(body), "--allow-repo-ref", "infra-public",
+                                   repo_env="my-org/infra-public").returncode, 0)
+        self.assertEqual(self._cli("--text-file", str(body), repo_env="my-org/infra-public").returncode, 0)
+
+    def test_the_actions_repository_exempts_no_other_owner_or_longer_name(self):
+        for ref in ("other/infra-public#46", "my-org/infra-public-xy#46", "infra-public-xy#46"):  # leak-guard-allow: fixture
+            with self.subTest(ref=ref):
+                body = self.repo / "ref.md"
+                body.write_text(f"Refs {ref}\n")
+                self.assertEqual(self._cli("--text-file", str(body),
+                                           repo_env="my-org/infra-public").returncode, 1)
+
+    def test_a_malformed_actions_repository_exempts_nothing(self):
+        body = self.repo / "ref.md"
+        body.write_text("Refs infra-public#46\n")
+        for value in ("infra-public", "a/b/c", "my-org/(.*)"):
+            with self.subTest(value=value):
+                self.assertEqual(self._cli("--text-file", str(body), repo_env=value).returncode, 1)
+
     def test_no_source_argument_is_a_usage_error(self):
         self.assertEqual(self._cli().returncode, 2)
 
+
+
+def _scan_env(repo: str) -> dict[str, str]:
+    """The test's environment with GITHUB_REPOSITORY set to `repo`, or unset
+    when it is empty, so the runner's own value never decides a case."""
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
+    if repo:
+        env["GITHUB_REPOSITORY"] = repo
+    return env
 
 
 class TreeMode(unittest.TestCase):
@@ -514,7 +551,8 @@ class TreeMode(unittest.TestCase):
 
     def _cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(SCRIPT), "--tree", *args],
-                              cwd=cwd or self.repo, capture_output=True, text=True)
+                              cwd=cwd or self.repo, capture_output=True, text=True,
+                              env=_scan_env(""))
 
     def test_clean_tree_exits_0_and_says_what_it_scanned(self):
         self._commit({"a.md": b"nothing here\n", "b/c.py": b"x = 1\n"})

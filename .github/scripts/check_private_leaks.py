@@ -77,7 +77,8 @@ deliberate differences, all needed to make one script serve every repo:
   1. The "this repo's own issue refs are fine" exemption was hardcoded to one
      repo name. It is now --allow-repo-ref, supplied by the caller, and exempts
      exactly the repo named: `<owner>/<repo>` covers that repo's qualified and
-     bare refs, a bare `<repo>` only its bare refs.
+     bare refs, a bare `<repo>` only its bare refs. In Actions the run's own
+     GITHUB_REPOSITORY is always allowed in both forms.
   2. The cross-repo-ref pattern missed the FULLY-QUALIFIED form (`<owner>/<repo>#1`
      slipped past the lookbehind entirely), which is the more revealing of the
      two. It now matches both forms.
@@ -186,6 +187,25 @@ PATTERNS: list[tuple[str, str, str]] = [
 # naming a private repo. A bare `#123` is always this repo's
 # own issue and is never matched.
 REPO_REF_WHY = "a cross-repo issue reference (may name a private repo)"
+
+
+# GitHub's own rule for an owner and a repo name, so a value that is not one
+# never becomes part of the exemption.
+ACTIONS_REPO_RE = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+
+
+def actions_repository() -> list[str]:
+    """The repo an Actions run belongs to, as an allowed `<owner>/<repo>`.
+
+    In a reusable workflow GITHUB_REPOSITORY is the CALLER's repo, and no pull
+    request can set it. Callers pinned to a reusable that passed only the bare
+    name (`--allow-repo-ref <repo>`) had every `<owner>/<repo>#1` ref to
+    themselves flagged once a bare name stopped exempting the qualified form
+    (2026-10-20); this restores exactly that, for that one repo. Empty outside
+    Actions or when the value is not an `<owner>/<repo>`.
+    """
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    return [repo] if ACTIONS_REPO_RE.fullmatch(repo) else []
 
 
 def repo_ref_pattern(allowed: list[str]) -> str:
@@ -517,7 +537,8 @@ def main() -> int:
         metavar="[OWNER/]NAME",
         help="repo whose issue refs are fine (repeatable): `<owner>/<name>` "
         "exempts `<owner>/<name>#123` and `<name>#123`, a bare `<name>` only "
-        "`<name>#123`; callers pass at least their own repo",
+        "`<name>#123`; callers pass at least their own repo. In Actions, "
+        "GITHUB_REPOSITORY is added as `<owner>/<name>`",
     )
     ap.add_argument(
         "--require-changes",
@@ -527,7 +548,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    rules = build_patterns(args.allow_repo_ref)
+    rules = build_patterns(args.allow_repo_ref + actions_repository())
     n_shapes = len(rules)
     n_deny = 0
     if args.deny_list_ssm:
