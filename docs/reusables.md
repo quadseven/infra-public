@@ -20,7 +20,7 @@ names the test files under `.github/scripts/` that exercise its text.
 
 | Workflow | Run on PRs by | Tested by |
 | --- | --- | --- |
-| [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | - |
+| [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
 | [`_reusable.smoke-test.yml`](#reusablesmoke-testyml) | `canary.smoke-test.yml` | - |
 | [`_reusable.upstream-drift-check.yml`](#reusableupstream-drift-checkyml) | `canary.upstream-drift-check.yml` | `workflow_hygiene_test.py` |
 | [`build.container-multiarch.yml`](#buildcontainer-multiarchyml) | `canary.ship-python.yml` | - |
@@ -37,7 +37,7 @@ names the test files under `.github/scripts/` that exercise its text.
 
 _reusable - Leak scan (PR diff + PR/issue text, or full tree). Source: [`.github/workflows/_reusable.leak-scan.yml`](../.github/workflows/_reusable.leak-scan.yml).
 
-Run on PRs by: `self-leak-scan.yml`. Tested by: nothing in this repository.
+Run on PRs by: `self-leak-scan.yml`. Tested by: `.github/scripts/leak_scan_steps_test.py`.
 
 ### Inputs
 
