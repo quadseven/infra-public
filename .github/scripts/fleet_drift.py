@@ -156,6 +156,51 @@ def cmp_for(key: str) -> Callable[[str, str], int | None]:
 # ---------------------------------------------------------------- extraction
 
 
+def _action_occurrence(
+    repo: str, path: str, n: int, m: re.Match, stripped: str
+) -> Occurrence | None:
+    """The setting a `uses:` line pins, or None for a local or docker action."""
+    action, ref, label = m.group(2), m.group(3), m.group(4) or ""
+    if action.startswith(("./", "docker:")):
+        return None
+    value = label if label and version_key(label) else ref
+    return Occurrence(repo, f"action:{action}", value, path, n, stripped, ref)
+
+
+def _tool_settings(
+    repo: str, path: str, n: int, line: str, stripped: str
+) -> list[Occurrence]:
+    """Tools pinned in a command: `ruff@X`, `ruff==X`, a release download."""
+    found = [
+        m for pattern in (TOOL_RE, TOOL_DOWNLOAD_RE) for m in pattern.finditer(line)
+    ]
+    return [
+        Occurrence(repo, f"tool:{m.group(1)}", m.group(2), path, n, stripped)
+        for m in found
+    ]
+
+
+def _plain_settings(
+    repo: str, path: str, n: int, line: str, stripped: str, action: str
+) -> list[Occurrence]:
+    """Every setting on a non-`uses:` line; `action` is the step's action, if any."""
+    m = RUNS_ON_RE.match(line)
+    if m:
+        label = f"{m.group(1)}-{m.group(2)}"
+        return [Occurrence(repo, f"runner:{m.group(1)}", label, path, n, stripped)]
+    m = WITH_VERSION_RE.match(line)
+    if m:
+        return [Occurrence(repo, m.group(2), m.group(3), path, n, stripped)]
+    m = INPUT_VERSION_RE.match(line)
+    if m:
+        return (
+            [Occurrence(repo, f"with:{action}:version", m.group(2), path, n, stripped)]
+            if action
+            else []
+        )
+    return _tool_settings(repo, path, n, line, stripped)
+
+
 def extract(repo: str, path: str, text: str) -> list[Occurrence]:
     """Every shared setting in one workflow or action file."""
     out: list[Occurrence] = []
@@ -166,61 +211,20 @@ def extract(repo: str, path: str, text: str) -> list[Occurrence]:
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
-        indent = len(line) - len(stripped)
-        if current_action and indent <= action_indent:
+        if current_action and len(line) - len(stripped) <= action_indent:
             current_action = ""
         m = USES_RE.match(line)
-        if m:
-            action, ref, label = m.group(2), m.group(3), m.group(4) or ""
-            if action.startswith(("./", "docker:")):
-                continue
-            value = label if label and version_key(label) else ref
-            out.append(
-                Occurrence(repo, f"action:{action}", value, path, n, stripped, ref)
-            )
-            current_action = action
-            # A step's keys sit right of its dash (`- uses:`), or level with a
-            # bare `uses:`; a line at or left of this column ends the step.
-            action_indent = len(m.group(1)) - (0 if stripped.startswith("-") else 1)
+        if not m:
+            out.extend(_plain_settings(repo, path, n, line, stripped, current_action))
             continue
-        m = RUNS_ON_RE.match(line)
-        if m:
-            out.append(
-                Occurrence(
-                    repo,
-                    f"runner:{m.group(1)}",
-                    f"{m.group(1)}-{m.group(2)}",
-                    path,
-                    n,
-                    stripped,
-                )
-            )
+        occ = _action_occurrence(repo, path, n, m, stripped)
+        if occ is None:
             continue
-        m = WITH_VERSION_RE.match(line)
-        if m:
-            out.append(Occurrence(repo, m.group(2), m.group(3), path, n, stripped))
-            continue
-        m = INPUT_VERSION_RE.match(line)
-        if m and current_action:
-            out.append(
-                Occurrence(
-                    repo,
-                    f"with:{current_action}:version",
-                    m.group(2),
-                    path,
-                    n,
-                    stripped,
-                )
-            )
-            continue
-        for m in TOOL_RE.finditer(line):
-            out.append(
-                Occurrence(repo, f"tool:{m.group(1)}", m.group(2), path, n, stripped)
-            )
-        for m in TOOL_DOWNLOAD_RE.finditer(line):
-            out.append(
-                Occurrence(repo, f"tool:{m.group(1)}", m.group(2), path, n, stripped)
-            )
+        out.append(occ)
+        current_action = occ.key.split(":", 1)[1]
+        # A step's keys sit right of its dash (`- uses:`), or level with a
+        # bare `uses:`; a line at or left of this column ends the step.
+        action_indent = len(m.group(1)) - (0 if stripped.startswith("-") else 1)
     return out
 
 
@@ -336,6 +340,43 @@ def change_text(s: Setting, o: Occurrence, target: str) -> str:
     return f"`{o.text}` -> `{o.text.replace(o.value, target)}`"
 
 
+AHEAD = "ahead"
+
+
+def _against_majority(s: Setting, o: Occurrence) -> Entry | str | None:
+    """Entry, AHEAD, or None (on the majority) for one occurrence."""
+    if o.value == s.majority:
+        return None
+    c = cmp_for(s.key)(o.value, s.majority)
+    if c == -1:
+        return Entry("defect", o, s.majority, change_text(s, o, s.majority))
+    if c == 1:
+        return AHEAD
+    return Entry(
+        "judgment",
+        o,
+        "",
+        f"`{o.value}` does not order against the majority `{s.majority}`",
+    )
+
+
+def _without_majority(
+    s: Setting, o: Occurrence, best: str | None, values: list[str]
+) -> Entry | None:
+    """A judgment call, and never toward an older value."""
+    if best is None:
+        others = ", ".join(f"`{v}`" for v in values if v != o.value)
+        return Entry("judgment", o, "", f"{no_majority(s)}; other repos carry {others}")
+    if o.value == best or cmp_for(s.key)(o.value, best) in (0, 1):
+        return None
+    return Entry(
+        "judgment",
+        o,
+        best,
+        f"{no_majority(s)}; the newest in the fleet is {change_text(s, o, best)}",
+    )
+
+
 def analyse(
     sets: list[Setting],
 ) -> tuple[dict[str, list[Entry]], list[tuple[Setting, Occurrence]]]:
@@ -343,52 +384,17 @@ def analyse(
     entries: dict[str, list[Entry]] = {}
     ahead: list[tuple[Setting, Occurrence]] = []
     for s in sets:
-        cmp = cmp_for(s.key)
         values = sorted(set(s.per_repo.values()))
         best = newest(values, s.key)
         for o in s.occurrences:
             if s.majority is not None:
-                if o.value == s.majority:
-                    continue
-                c = cmp(o.value, s.majority)
-                if c == -1:
-                    entries.setdefault(o.repo, []).append(
-                        Entry("defect", o, s.majority, change_text(s, o, s.majority))
-                    )
-                elif c == 1:
-                    ahead.append((s, o))
-                else:
-                    entries.setdefault(o.repo, []).append(
-                        Entry(
-                            "judgment",
-                            o,
-                            "",
-                            f"`{o.value}` does not order against the majority `{s.majority}`",
-                        )
-                    )
-                continue
-            # No majority: a judgment call, and never toward an older value.
-            if best is not None:
-                if o.value == best or cmp(o.value, best) in (0, 1):
-                    continue
-                entries.setdefault(o.repo, []).append(
-                    Entry(
-                        "judgment",
-                        o,
-                        best,
-                        f"{no_majority(s)}; the newest in the fleet is {change_text(s, o, best)}",
-                    )
-                )
+                got = _against_majority(s, o)
             else:
-                others = ", ".join(f"`{v}`" for v in values if v != o.value)
-                entries.setdefault(o.repo, []).append(
-                    Entry(
-                        "judgment",
-                        o,
-                        "",
-                        f"{no_majority(s)}; other repos carry {others}",
-                    )
-                )
+                got = _without_majority(s, o, best, values)
+            if got == AHEAD:
+                ahead.append((s, o))
+            elif isinstance(got, Entry):
+                entries.setdefault(o.repo, []).append(got)
     for items in entries.values():
         items.sort(key=lambda e: (e.occ.path, e.occ.line, e.occ.key))
     return entries, ahead
@@ -436,7 +442,8 @@ def render_summary(
             lines.append(f"- {repo} `{e.occ.path}:{e.occ.line}` {e.kind}: {e.change}")
     for s, o in ahead:
         lines.append(
-            f"- {o.repo} `{o.path}:{o.line}` ahead of the majority `{s.majority}` with `{o.value}`; not asked to downgrade"
+            f"- {o.repo} `{o.path}:{o.line}` ahead of the majority `{s.majority}` "
+            f"with `{o.value}`; not asked to downgrade"
         )
     lines.append("")
     return "\n".join(lines)
@@ -446,11 +453,11 @@ def render_issue(repo: str, items: list[Entry]) -> str:
     defects = [e for e in items if e.kind == "defect"]
     judgments = [e for e in items if e.kind == "judgment"]
     out = [
-        f"The weekly fleet drift report found {len(defects)} setting(s) in {repo} behind the "
-        f"fleet majority and {len(judgments)} judgment call(s).",
+        f"The weekly fleet drift report found {len(defects)} setting(s) in {repo} "
+        f"behind the fleet majority and {len(judgments)} judgment call(s).",
         "",
-        "A newer pin than the majority is never listed here: the fleet catches up to it, "
-        "not the other way round.",
+        "A newer pin than the majority is never listed here: the fleet catches up "
+        "to it, not the other way round.",
         "",
     ]
     if defects:
@@ -474,7 +481,8 @@ def render_issue(repo: str, items: list[Entry]) -> str:
         ]
         out.append("")
     out.append(
-        "This issue is rewritten by every run and closed by the first run that finds no difference."
+        "This issue is rewritten by every run and closed by the first run that "
+        "finds no difference."
     )
     return "\n".join(out) + "\n"
 
@@ -503,9 +511,13 @@ class GitHub:
         self.opener = opener or urllib.request.urlopen
 
     def call(self, method: str, path: str, body: dict | None = None):
-        url = path if path.startswith("http") else API + path
+        if not path.startswith("/"):
+            raise ValueError(f"not an API path: {path!r}")
+        # API + an absolute path: the scheme is always https, never file: or
+        # a caller-chosen one, which is what S310 guards against.
+        url = API + path
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        req = urllib.request.Request(url, data=data, method=method)  # noqa: S310
         req.add_header("Accept", "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
         if self.token:
@@ -540,80 +552,95 @@ def fetch(gh: GitHub, repos: list[str], out: Path) -> None:
             target.write_bytes(base64.b64decode(blob["content"]))
 
 
+def _open_drift_issues(gh: GitHub, issue_repo: str) -> dict[str, int]:
+    """Title -> number of every open `Fleet drift:` issue (not PR) in the tracker."""
+    existing: dict[str, int] = {}
+    page = 1
+    while True:
+        batch = (
+            gh.call(
+                "GET",
+                f"/repos/{issue_repo}/issues?state=open&labels={LABEL}&per_page=100&page={page}",
+            )
+            or []
+        )
+        for it in batch:
+            if "pull_request" not in it and it["title"].startswith(TITLE_PREFIX):
+                existing[it["title"]] = it["number"]
+        if len(batch) < 100:
+            return existing
+        page += 1
+
+
+def _ensure_label(gh: GitHub, issue_repo: str) -> None:
+    try:
+        gh.call(
+            "POST",
+            f"/repos/{issue_repo}/labels",
+            {
+                "name": LABEL,
+                "color": "c5def5",
+                "description": "Weekly fleet drift report",
+            },
+        )
+    except urllib.error.HTTPError as e:
+        e.close()
+        if e.code != 422:  # 422: the label already exists
+            raise
+
+
+def _planned_writes(
+    plan: dict, issue_repo: str, existing: dict[str, int]
+) -> list[tuple[str, list[tuple]]]:
+    """(description, [(method, path, body), ...]) for every issue change, in order."""
+    base = f"/repos/{issue_repo}/issues"
+    out: list[tuple[str, list[tuple]]] = []
+    for issue in plan["issues"]:
+        num = existing.get(issue["title"])
+        if num:
+            out.append(
+                (
+                    f"update #{num} {issue['title']}",
+                    [("PATCH", f"{base}/{num}", {"body": issue["body"]})],
+                )
+            )
+        else:
+            body = {"title": issue["title"], "body": issue["body"], "labels": [LABEL]}
+            out.append((f"create {issue['title']}", [("POST", base, body)]))
+    for repo in plan["clean"]:
+        title = TITLE_PREFIX + repo
+        num = existing.get(title)
+        if num:
+            note = {
+                "body": "The fleet drift report finds no difference for this repo "
+                "any more. Closing."
+            }
+            close = {"state": "closed", "state_reason": "completed"}
+            out.append(
+                (
+                    f"close #{num} {title}",
+                    [
+                        ("POST", f"{base}/{num}/comments", note),
+                        ("PATCH", f"{base}/{num}", close),
+                    ],
+                )
+            )
+    return out
+
+
 def file_issues(
     gh: GitHub, plan: dict, issue_repo: str, dry_run: bool, log=print
 ) -> list[str]:
     """Create, rewrite or close one `Fleet drift: <repo>` issue per listed repo."""
-    actions: list[str] = []
-    existing: dict[str, int] = {}
-    page = 1
-    while True:
-        batch = gh.call(
-            "GET",
-            f"/repos/{issue_repo}/issues?state=open&labels={LABEL}&per_page=100&page={page}",
-        )
-        for it in batch or []:
-            if "pull_request" not in it and it["title"].startswith(TITLE_PREFIX):
-                existing[it["title"]] = it["number"]
-        if not batch or len(batch) < 100:
-            break
-        page += 1
+    writes = _planned_writes(plan, issue_repo, _open_drift_issues(gh, issue_repo))
     if plan["issues"] and not dry_run:
-        try:
-            gh.call(
-                "POST",
-                f"/repos/{issue_repo}/labels",
-                {
-                    "name": LABEL,
-                    "color": "c5def5",
-                    "description": "Weekly fleet drift report",
-                },
-            )
-        except urllib.error.HTTPError as e:
-            e.close()
-            if e.code != 422:  # 422: the label already exists
-                raise
-    for issue in plan["issues"]:
-        num = existing.get(issue["title"])
-        if num:
-            actions.append(f"update #{num} {issue['title']}")
-            if not dry_run:
-                gh.call(
-                    "PATCH",
-                    f"/repos/{issue_repo}/issues/{num}",
-                    {"body": issue["body"]},
-                )
-        else:
-            actions.append(f"create {issue['title']}")
-            if not dry_run:
-                gh.call(
-                    "POST",
-                    f"/repos/{issue_repo}/issues",
-                    {"title": issue["title"], "body": issue["body"], "labels": [LABEL]},
-                )
-    for repo in plan["clean"]:
-        num = existing.get(TITLE_PREFIX + repo)
-        if num:
-            actions.append(f"close #{num} {TITLE_PREFIX + repo}")
-            if not dry_run:
-                gh.call(
-                    "POST",
-                    f"/repos/{issue_repo}/issues/{num}/comments",
-                    {
-                        "body": "The fleet drift report finds no difference for this repo any more. Closing."
-                    },
-                )
-                gh.call(
-                    "PATCH",
-                    f"/repos/{issue_repo}/issues/{num}",
-                    {"state": "closed", "state_reason": "completed"},
-                )
-    for a in actions:
-        log(("dry run: would " if dry_run else "") + a)
-    return actions
-
-
-# ---------------------------------------------------------------- CLI
+        _ensure_label(gh, issue_repo)
+    for what, calls in writes:
+        log(("dry run: would " if dry_run else "") + what)
+        if not dry_run:
+            for method, path, body in calls:
+                gh.call(method, path, body)
+    return [what for what, _ in writes]
 
 
 def parse_repos(text: str) -> list[str]:

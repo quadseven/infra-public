@@ -288,6 +288,15 @@ class Filing(unittest.TestCase):
         )
 
 
+class Client(unittest.TestCase):
+    def test_only_api_paths_are_opened(self):
+        fake = FakeAPI({})
+        for bad in ("file:///etc/passwd", "https://example.com/x", "repos/o/a"):
+            with self.assertRaises(ValueError):
+                GitHub("tok", fake).call("GET", bad)
+        self.assertEqual(fake.calls, [])
+
+
 class Fetching(unittest.TestCase):
     def test_fetch_copies_only_workflow_and_action_files_read_only(self):
         content = base64.b64encode(b"name: ci\n").decode()
