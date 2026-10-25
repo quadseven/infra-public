@@ -20,6 +20,7 @@ names the test files under `.github/scripts/` that exercise its text.
 
 | Workflow | Run on PRs by | Tested by |
 | --- | --- | --- |
+| [`_reusable.ci-config-freshness.yml`](#reusableci-config-freshnessyml) | `self-ci-config-freshness.yml` | `ci_config_freshness_test.py` |
 | [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
 | [`_reusable.smoke-test.yml`](#reusablesmoke-testyml) | `canary.smoke-test.yml` | - |
 | [`_reusable.upstream-drift-check.yml`](#reusableupstream-drift-checkyml) | `canary.upstream-drift-check.yml` | `workflow_hygiene_test.py` |
@@ -32,6 +33,23 @@ names the test files under `.github/scripts/` that exercise its text.
 | [`deploy.pages.yml`](#deploypagesyml) | `canary.deploy-pages.yml` | - |
 | [`ship.python.yml`](#shippythonyml) | `canary.ship-python.yml` | - |
 | [`sync.public-repo-docs.yml`](#syncpublic-repo-docsyml) | - | `sync_docs_steps_test.py`, `workflow_hygiene_test.py` |
+
+## _reusable.ci-config-freshness.yml
+
+_reusable - CI config freshness (PR branch has the base's CI changes). Source: [`.github/workflows/_reusable.ci-config-freshness.yml`](../.github/workflows/_reusable.ci-config-freshness.yml).
+
+Run on PRs by: `self-ci-config-freshness.yml`. Tested by: `.github/scripts/ci_config_freshness_test.py`.
+
+### Inputs
+
+| Name | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `paths` | string | no | ` ` | Comma- or newline-separated paths that count as CI config; a commit on the base touching any of them after the merge-base fails the check. Empty = the script's defaults: .github/workflows/, .github/actions/, .github/rulesets/, .loom/validation.conf. |
+| `base-ref` | string | no | ` ` | Base branch name to compare with. Empty = the PR's base branch (github.base_ref). |
+| `script-ref` | string | no | `main` | infra-public revision to take ci_config_freshness.py from. Default `main`. Set a SHA to pin the script as well as the workflow. |
+| `runner` | string | no | `ubuntu-latest` | Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool. |
+| `timeout-minutes` | number | no | `5` | Job timeout. |
+
 
 ## _reusable.leak-scan.yml
 
