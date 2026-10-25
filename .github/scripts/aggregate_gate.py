@@ -265,14 +265,30 @@ def poll(
     log: Callable[[str], None],
     **rules,
 ) -> Verdict:
-    """Fetch and evaluate until the verdict is final or `timeout` passes."""
+    """Fetch and evaluate until the verdict is final or `timeout` passes.
+
+    A failing verdict is confirmed by one more read an interval later before
+    it is returned: some apps post a check as completed and then rewrite its
+    conclusion (a code-scanning check can read `neutral` for a few seconds
+    before it settles on `success`). A failure that is still there on the
+    second read is final.
+    """
     start = clock()
     last_waiting: list[str] | None = None
+    unconfirmed: Verdict | None = None
     while True:
         elapsed = clock() - start
         verdict = evaluate_checks(fetch(), elapsed=elapsed, **rules)
-        if verdict.state != "pending":
+        if verdict.state == "pass":
             return verdict
+        if verdict.state == "fail":
+            if unconfirmed is not None:
+                return verdict
+            log(f"failure seen, confirming on the next read: {'; '.join(verdict.problems)}")
+            unconfirmed = verdict
+            sleep(interval)
+            continue
+        unconfirmed = None
         if elapsed >= timeout:
             return Verdict(
                 "fail",

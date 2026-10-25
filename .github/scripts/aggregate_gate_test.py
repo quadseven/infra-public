@@ -256,6 +256,29 @@ class PollLoop(unittest.TestCase):
         ])
         self.assertEqual(v.problems, ["a: cancelled"])
 
+    def test_failure_is_confirmed_by_a_second_read(self):
+        v, t = self.run_loop([
+            Snapshot([check("a", conclusion="failure")]),
+            Snapshot([check("a", conclusion="failure")]),
+        ])
+        self.assertEqual(v.state, "fail")
+        self.assertEqual(t, 30)
+
+    def test_a_conclusion_rewritten_to_success_passes(self):
+        # A code-scanning check read `neutral`, then settled on `success`.
+        v, _ = self.run_loop([
+            Snapshot([check("a"), check("CodeQL", conclusion="neutral", cid=2)]),
+            Snapshot([check("a"), check("CodeQL", cid=2)]),
+        ])
+        self.assertEqual(v.state, "pass")
+
+    def test_a_different_failure_on_the_confirming_read_still_fails(self):
+        v, _ = self.run_loop([
+            Snapshot([check("a", conclusion="failure")]),
+            Snapshot([check("a", conclusion="cancelled")]),
+        ])
+        self.assertEqual(v.problems, ["a: cancelled"])
+
 
 class Cli(unittest.TestCase):
     def run_main(self, argv, env):

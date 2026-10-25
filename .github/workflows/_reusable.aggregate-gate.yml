@@ -218,4 +218,4 @@ jobs:
           set -euo pipefail
           export GATE_TIMEOUT=$(( WAIT_MINUTES * 60 ))
           export GATE_START_TIMEOUT=$(( START_MINUTES * 60 ))
-          python3 "$GATE_SCRIPT" poll
+          python3 -u "$GATE_SCRIPT" poll
