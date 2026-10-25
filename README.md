@@ -39,6 +39,7 @@ you can copy.
 | `deploy.pages.yml` | publish a directory to GitHub Pages; `dry_run: true` uploads the Pages artifact and stops before the publish |
 | `_reusable.smoke-test.yml` | curl a list of endpoints with retries and assert status and body |
 | `_reusable.upstream-drift-check.yml` | open an issue when a pinned upstream repo moves past its pin |
+| `_reusable.fleet-drift.yml` | weekly: take the majority value of each shared CI setting across a list of repos and keep one issue per repo that drifts, never asking a newer pin to downgrade |
 | `_reusable.leak-scan.yml` | refuse a PR, issue or tree that carries private identifiers (hostnames, private IPs, local paths, names) |
 | `_reusable.ci-config-freshness.yml` | fail a PR whose branch is missing CI config commits (workflows, actions, rulesets, validation contract) that landed on the base after it forked; see [`docs/ci-config-freshness.md`](docs/ci-config-freshness.md) |
 | `check.issue-close-completeness.yml` | reopen an issue closed as completed while its checkboxes are unticked |

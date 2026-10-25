@@ -21,6 +21,8 @@ on:
       - ".github/scripts/sync_docs_steps_test.py"
       - ".github/scripts/check_private_leaks.py"
       - ".github/scripts/deploy_k8s_steps_test.py"
+      - ".github/scripts/fleet_drift.py"
+      - ".github/scripts/fleet_drift_test.py"
       - ".github/workflows/check.workflow-hygiene.yml"
   push:
     branches: [main]
@@ -48,5 +50,7 @@ jobs:
         run: python3 .github/scripts/workflow_hygiene_test.py
       - name: "Lint this repo's own workflows"
         run: python3 .github/scripts/workflow_hygiene.py
+      - name: "Unit tests for the fleet drift report"
+        run: python3 .github/scripts/fleet_drift_test.py
       - name: "Run the docs-sync leak-scan steps as written (infra-public#113)"
         run: python3 .github/scripts/sync_docs_steps_test.py

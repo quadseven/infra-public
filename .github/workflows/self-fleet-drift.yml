@@ -1,0 +1,37 @@
+name: fleet drift report
+
+# This repo's own run of _reusable.fleet-drift.yml (infra-public#167): every
+# Monday it compares the shared CI settings of the public repos that build on
+# this library and keeps one `Fleet drift: <repo>` issue per repo that drifts,
+# in this tracker. The repos are all public, so the run's own token reads them
+# and needs no secret. A pull request that touches the report runs it as a dry
+# run with the script from the PR head: the report lands in the job summary
+# and no issue is written.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/_reusable.fleet-drift.yml"
+      - ".github/workflows/self-fleet-drift.yml"
+      - ".github/scripts/fleet_drift.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  drift:
+    uses: ./.github/workflows/_reusable.fleet-drift.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      repos: quadseven/infra-public, quadseven/grug, quadseven/loom
+      dry-run: ${{ github.event_name == 'pull_request' }}
+      script-ref: ${{ github.event.pull_request.head.sha || github.sha }}

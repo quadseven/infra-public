@@ -115,3 +115,29 @@ The canonical copy remains the source of truth for the rule *definitions*;
 this copy is the source of truth for infra-public's own compliance with
 them. Because this repo cannot read the private one, the check that
 `CANONICAL_RULE_COUNT` itself is current has to live on the private side.
+
+## Fleet drift report
+
+The rules above check one repo against fixed rules. Drift between repos is a
+different question: each repo can be clean on its own while one pins
+`actions/checkout` two majors behind its siblings. `_reusable.fleet-drift.yml`
+answers it (infra-public#167), running `.github/scripts/fleet_drift.py`;
+`self-fleet-drift.yml` runs it here every Monday over the public repos that
+build on this library.
+
+For each shared setting (pinned action versions, GitHub-hosted runner labels,
+`*-version` inputs, a `version:` input to an action, and tool versions pinned
+in a command such as `ruff@X`, `ruff==X` or an actionlint release download)
+it takes the value the most repos carry, and keeps one `Fleet drift: <repo>`
+issue per repo that differs:
+
+- older than the majority: a defect, with file:line and the exact edit;
+- newer than the majority: listed in the report as ahead, never asked to
+  downgrade;
+- no majority (two repos that disagree, or a tie) or values that do not order
+  (`ubuntu-latest` against `ubuntu-24.04`, two unlabelled SHAs): a judgment
+  call. A judgment call only ever points at the newest value.
+
+A run rewrites each open issue in place and closes it once the repo matches.
+The fixture repos under `.github/scripts/fixtures/fleet_drift/` pin each of
+these cases in `fleet_drift_test.py`.
