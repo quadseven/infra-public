@@ -341,6 +341,28 @@ class Fetching(unittest.TestCase):
         self.assertEqual({m for m, *_ in fake.calls}, {"GET"})
 
 
+WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
+
+
+class Workflows(unittest.TestCase):
+    def test_reusable_runs_fetch_report_then_file_and_honours_dry_run(self):
+        text = (WORKFLOWS / "_reusable.fleet-drift.yml").read_text()
+        order = [text.index(f"fleet_drift.py {cmd}") for cmd in ("fetch", "report")]
+        order.append(text.index('"${args[@]}"'))
+        self.assertEqual(order, sorted(order))
+        self.assertIn("args=(file --plan", text)
+        self.assertIn(
+            'if [ "$DRY_RUN" = "true" ]; then\n            args+=(--dry-run)', text
+        )
+        self.assertIn("GH_TOKEN: ${{ secrets.token || github.token }}", text)
+
+    def test_self_run_is_a_dry_run_on_pull_requests(self):
+        text = (WORKFLOWS / "self-fleet-drift.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/_reusable.fleet-drift.yml", text)
+        self.assertIn("dry-run: ${{ github.event_name == 'pull_request' }}", text)
+        self.assertIn('cron: "0 13 * * 1"', text)
+
+
 class Cli(unittest.TestCase):
     def test_report_then_dry_run_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,7 +21,7 @@ names the test files under `.github/scripts/` that exercise its text.
 | Workflow | Run on PRs by | Tested by |
 | --- | --- | --- |
 | [`_reusable.ci-config-freshness.yml`](#reusableci-config-freshnessyml) | `self-ci-config-freshness.yml` | `ci_config_freshness_test.py` |
-| [`_reusable.fleet-drift.yml`](#reusablefleet-driftyml) | `self-fleet-drift.yml` | - |
+| [`_reusable.fleet-drift.yml`](#reusablefleet-driftyml) | `self-fleet-drift.yml` | `fleet_drift_test.py` |
 | [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
 | [`_reusable.smoke-test.yml`](#reusablesmoke-testyml) | `canary.smoke-test.yml` | - |
 | [`_reusable.upstream-drift-check.yml`](#reusableupstream-drift-checkyml) | `canary.upstream-drift-check.yml` | `workflow_hygiene_test.py` |
@@ -56,7 +56,7 @@ Run on PRs by: `self-ci-config-freshness.yml`. Tested by: `.github/scripts/ci_co
 
 _reusable - fleet drift report. Source: [`.github/workflows/_reusable.fleet-drift.yml`](../.github/workflows/_reusable.fleet-drift.yml).
 
-Run on PRs by: `self-fleet-drift.yml`. Tested by: nothing in this repository.
+Run on PRs by: `self-fleet-drift.yml`. Tested by: `.github/scripts/fleet_drift_test.py`.
 
 ### Inputs
 
