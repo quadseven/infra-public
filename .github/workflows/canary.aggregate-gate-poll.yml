@@ -1,0 +1,39 @@
+name: Canary - Aggregate gate (poll)
+
+# Canary for _reusable.aggregate-gate.yml in poll mode: waits for every
+# other check on the PR head (the fold canary, the unit tests, workflow
+# hygiene, leak scan, CodeQL ...) and goes green only once they all have.
+# The review bot's checks are ignored: they are not CI legs, and one of them
+# reports `neutral` by design.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/aggregate_gate.py"
+      - ".github/workflows/_reusable.aggregate-gate.yml"
+      - ".github/workflows/canary.aggregate-gate-poll.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: ./.github/workflows/_reusable.aggregate-gate.yml
+    permissions:
+      contents: read
+      checks: read
+      statuses: read
+    with:
+      mode: poll
+      ignore: "Grug - *"
+      expected: |
+        gate / aggregate
+        test
+      wait-minutes: 30
+      start-timeout-minutes: 10
+      timeout-minutes: 40
+      script-ref: ${{ github.event.pull_request.head.sha }}

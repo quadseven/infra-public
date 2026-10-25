@@ -1,0 +1,40 @@
+name: check - aggregate gate
+
+# Gates the aggregate gate's logic (.github/scripts/aggregate_gate.py)
+# behind its unit suite. The script is fetched at runtime by
+# _reusable.aggregate-gate.yml in every consuming repo, so a regression here
+# does not break one repo's gate - and the way it would break is by going
+# GREEN on a failed or missing leg, which no consumer would notice.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/aggregate_gate.py"
+      - ".github/scripts/aggregate_gate_test.py"
+      - ".github/workflows/_reusable.aggregate-gate.yml"
+      - ".github/workflows/canary.aggregate-gate.yml"
+      - ".github/workflows/canary.aggregate-gate-poll.yml"
+      - ".github/workflows/check.aggregate-gate.yml"
+      - "examples/aggregate-gate/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/aggregate_gate.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Unit suite for the aggregate gate"
+        run: python3 .github/scripts/aggregate_gate_test.py

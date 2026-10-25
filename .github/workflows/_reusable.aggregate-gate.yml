@@ -1,0 +1,221 @@
+name: _reusable - Aggregate gate (one required check, fails closed)
+
+# PURPOSE: one check a ruleset can require ON ITS OWN, green only when every
+#   other leg of CI really passed (infra-public#166).
+#
+# WHY. A ruleset that lists many required checks by name blocks a merge only
+#   when one of them REPORTS a failure. A required check that is renamed,
+#   path-filtered away, skipped by an `if:`, or never queued does not block -
+#   GitHub reports a job skipped by its `if:` as passing - so the gaps open
+#   quietly. This gate turns every one of those into a red check.
+#
+# THE LOGIC lives in .github/scripts/aggregate_gate.py (unit-tested by
+#   aggregate_gate_test.py), fetched from infra-public at `script-ref`, the
+#   same way _reusable.leak-scan.yml fetches its scanner.
+#
+# TWO MODES.
+#   fold (default, recommended). The caller runs its gate workflows as jobs
+#     and calls this as the last job with `needs:` on every one of them,
+#     `if: always()`, and `needs-json: ${{ toJSON(needs) }}`. Any leg that is
+#     not `success` fails the gate: failure, cancelled, no result, or skipped
+#     (unless listed in `allow-skipped`). `expected` names legs that must be
+#     in the results.
+#   poll. The gate is its own workflow and waits for the commit's other check
+#     runs and commit statuses through the API. It ignores its own workflow
+#     run and anything matching `ignore`, fails fast on any failing
+#     conclusion, fails a check still queued after `start-timeout-minutes`
+#     (never started) or an `expected` name that never appeared, and fails
+#     whatever is still running at `wait-minutes`. Needs `checks: read` and
+#     `statuses: read` on the caller's job.
+#
+# THE CALLER'S `if: always()` IS NOT OPTIONAL in fold mode. Without it the
+#   gate job is skipped when a leg fails, and a skipped required check counts
+#   as passing. `always()` (not `!cancelled()`) also makes a cancelled run
+#   report a red gate instead of none. This workflow cannot enforce that from
+#   inside; examples/aggregate-gate/README.md and the canary show the shape.
+#
+# The required check name is "<caller job name> / aggregate", e.g.
+#   `gate / aggregate`. Ruleset setup: examples/aggregate-gate/README.md.
+#
+# Example fold caller (.github/workflows/ci-gate.yml, no path filters):
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   permissions: { contents: read }
+#   jobs:
+#     lint:
+#       uses: ./.github/workflows/lint.yml
+#     test:
+#       uses: ./.github/workflows/test.yml
+#     gate:
+#       if: always()
+#       needs: [lint, test]
+#       uses: quadseven/infra-public/.github/workflows/_reusable.aggregate-gate.yml@<sha>
+#       with:
+#         needs-json: ${{ toJSON(needs) }}
+#
+# Example poll caller (.github/workflows/ci-gate.yml):
+#   on:
+#     pull_request:
+#   jobs:
+#     gate:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.aggregate-gate.yml@<sha>
+#       permissions: { contents: read, checks: read, statuses: read }
+#       with:
+#         mode: poll
+#         expected: |
+#           test
+#           lint
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "fold (default) = evaluate the caller's toJSON(needs). poll = wait for the commit's other check runs and statuses through the API."
+        required: false
+        type: string
+        default: "fold"
+      needs-json:
+        description: "fold mode: the caller's `${{ toJSON(needs) }}`. Required in fold mode."
+        required: false
+        type: string
+        default: ""
+      expected:
+        description: "Comma- or newline-separated names that must be present. fold: job ids in needs. poll: check-run or status names (glob patterns allowed); one that has not appeared by start-timeout-minutes fails the gate."
+        required: false
+        type: string
+        default: ""
+      allow-skipped:
+        description: "Comma- or newline-separated legs (globs) whose `skipped` result is correct and passes. Every other skipped leg fails the gate."
+        required: false
+        type: string
+        default: ""
+      ignore:
+        description: "poll mode: comma- or newline-separated check-run or status names (globs) to leave out entirely, such as a review bot's checks. The gate's own workflow run is always left out."
+        required: false
+        type: string
+        default: ""
+      allow-neutral:
+        description: "poll mode: true = a `neutral` conclusion passes. Default false: neutral is not a proven success."
+        required: false
+        type: boolean
+        default: false
+      sha:
+        description: "poll mode: commit to read checks from. Empty = the pull request head, else github.sha."
+        required: false
+        type: string
+        default: ""
+      wait-minutes:
+        description: "poll mode: fail whatever is still not finished after this many minutes."
+        required: false
+        type: number
+        default: 60
+      start-timeout-minutes:
+        description: "poll mode: fail a check still queued, or an expected name not yet seen, after this many minutes."
+        required: false
+        type: number
+        default: 10
+      settle-seconds:
+        description: "poll mode: do not pass before this many seconds, so a workflow that queues just after the gate is still seen."
+        required: false
+        type: number
+        default: 60
+      poll-interval-seconds:
+        description: "poll mode: seconds between API reads (two requests per read)."
+        required: false
+        type: number
+        default: 30
+      script-ref:
+        description: "infra-public revision to take aggregate_gate.py from. Default `main`. Set a SHA to pin the logic as well as the workflow. infra-public's own canaries pass their PR head SHA."
+        required: false
+        type: string
+        default: "main"
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout. In poll mode keep it above wait-minutes."
+        required: false
+        type: number
+        default: 75
+
+# No `permissions:` block: a called workflow may only narrow what the caller
+# granted, and the two modes need different scopes (fold: contents: read;
+# poll: plus checks: read and statuses: read). The caller grants them.
+
+jobs:
+  aggregate:
+    name: aggregate
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: "1. Refuse an unknown mode or a script-ref that is not a git ref"
+        id: rev
+        env:
+          MODE: ${{ inputs.mode }}
+          SCRIPT_REF: ${{ inputs.script-ref }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            fold|poll) ;;
+            *) echo "::error::unknown mode '$MODE' (expected 'fold' or 'poll')"; exit 1 ;;
+          esac
+          if [ -z "$SCRIPT_REF" ] || ! printf '%s' "$SCRIPT_REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::script-ref '$SCRIPT_REF' is empty or not a valid git ref"
+            exit 1
+          fi
+          echo "ref=$SCRIPT_REF" >> "$GITHUB_OUTPUT"
+
+      - name: "2. Fetch the gate script at that revision"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          ref: ${{ steps.rev.outputs.ref }}
+          sparse-checkout: .github/scripts/aggregate_gate.py
+          sparse-checkout-cone-mode: false
+          path: _gate
+          persist-credentials: false
+
+      - name: "3. Prove the script arrived (a missing gate must not go green)"
+        env:
+          GATE_SCRIPT: ${{ github.workspace }}/_gate/.github/scripts/aggregate_gate.py
+        run: |
+          set -euo pipefail
+          if [ ! -s "$GATE_SCRIPT" ]; then
+            echo "::error::aggregate_gate.py was not fetched (expected $GATE_SCRIPT). Failing closed."
+            exit 1
+          fi
+
+      - name: "4. Fold the caller's legs"
+        if: inputs.mode == 'fold'
+        env:
+          GATE_SCRIPT: ${{ github.workspace }}/_gate/.github/scripts/aggregate_gate.py
+          NEEDS_JSON: ${{ inputs.needs-json }}
+          GATE_EXPECTED: ${{ inputs.expected }}
+          GATE_ALLOW_SKIPPED: ${{ inputs.allow-skipped }}
+        run: |
+          set -euo pipefail
+          python3 "$GATE_SCRIPT" fold
+
+      - name: "4. Wait for the commit's other checks"
+        if: inputs.mode == 'poll'
+        env:
+          GATE_SCRIPT: ${{ github.workspace }}/_gate/.github/scripts/aggregate_gate.py
+          GITHUB_TOKEN: ${{ github.token }}
+          GATE_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          GATE_EXPECTED: ${{ inputs.expected }}
+          GATE_ALLOW_SKIPPED: ${{ inputs.allow-skipped }}
+          GATE_IGNORE: ${{ inputs.ignore }}
+          GATE_ALLOW_NEUTRAL: ${{ inputs.allow-neutral }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+          START_MINUTES: ${{ inputs.start-timeout-minutes }}
+          GATE_SETTLE: ${{ inputs.settle-seconds }}
+          GATE_INTERVAL: ${{ inputs.poll-interval-seconds }}
+        run: |
+          set -euo pipefail
+          export GATE_TIMEOUT=$(( WAIT_MINUTES * 60 ))
+          export GATE_START_TIMEOUT=$(( START_MINUTES * 60 ))
+          python3 "$GATE_SCRIPT" poll

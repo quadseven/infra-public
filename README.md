@@ -42,6 +42,7 @@ you can copy.
 | `_reusable.fleet-drift.yml` | weekly: take the majority value of each shared CI setting across a list of repos and keep one issue per repo that drifts, never asking a newer pin to downgrade |
 | `_reusable.leak-scan.yml` | refuse a PR, issue or tree that carries private identifiers (hostnames, private IPs, local paths, names) |
 | `_reusable.ci-config-freshness.yml` | fail a PR whose branch is missing CI config commits (workflows, actions, rulesets, validation contract) that landed on the base after it forked; see [`docs/ci-config-freshness.md`](docs/ci-config-freshness.md) |
+| `_reusable.aggregate-gate.yml` | one check a ruleset can require alone: fails when any other leg failed, was cancelled, skipped or never started ([guide](examples/aggregate-gate/README.md)) |
 | `check.issue-close-completeness.yml` | reopen an issue closed as completed while its checkboxes are unticked |
 | `sync.public-repo-docs.yml` | open a PR that syncs a repo's `AGENTS.md`/`CLAUDE.md` with `templates/public-repo/` |
 
