@@ -21,6 +21,7 @@ names the test files under `.github/scripts/` that exercise its text.
 | Workflow | Run on PRs by | Tested by |
 | --- | --- | --- |
 | [`_reusable.ci-config-freshness.yml`](#reusableci-config-freshnessyml) | `self-ci-config-freshness.yml` | `ci_config_freshness_test.py` |
+| [`_reusable.fleet-drift.yml`](#reusablefleet-driftyml) | `self-fleet-drift.yml` | `fleet_drift_test.py` |
 | [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
 | [`_reusable.smoke-test.yml`](#reusablesmoke-testyml) | `canary.smoke-test.yml` | - |
 | [`_reusable.upstream-drift-check.yml`](#reusableupstream-drift-checkyml) | `canary.upstream-drift-check.yml` | `workflow_hygiene_test.py` |
@@ -49,6 +50,30 @@ Run on PRs by: `self-ci-config-freshness.yml`. Tested by: `.github/scripts/ci_co
 | `script-ref` | string | no | `main` | infra-public revision to take ci_config_freshness.py from. Default `main`. Set a SHA to pin the script as well as the workflow. |
 | `runner` | string | no | `ubuntu-latest` | Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool. |
 | `timeout-minutes` | number | no | `5` | Job timeout. |
+
+
+## _reusable.fleet-drift.yml
+
+_reusable - fleet drift report. Source: [`.github/workflows/_reusable.fleet-drift.yml`](../.github/workflows/_reusable.fleet-drift.yml).
+
+Run on PRs by: `self-fleet-drift.yml`. Tested by: `.github/scripts/fleet_drift_test.py`.
+
+### Inputs
+
+| Name | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `repos` | string | yes |  | The repos to compare, as owner/name, comma or whitespace separated. At least two. |
+| `issue-repo` | string | no | ` ` | owner/name of the tracker that holds the drift issues. Empty = the calling repo. |
+| `dry-run` | boolean | no | `false` | true = write the report to the job summary and log the issue changes without making them. |
+| `script-ref` | string | no | `main` | The infra-public branch, tag or SHA the report script is taken from. |
+| `runner` | string | no | `ubuntu-latest` | Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool (private). |
+| `timeout-minutes` | number | no | `10` | Job timeout. |
+
+### Secrets
+
+| Name | Required | Description |
+| --- | --- | --- |
+| `token` | no | Optional token that can read every listed repo and write issues in issue-repo. Defaults to the run's GITHUB_TOKEN. |
 
 
 ## _reusable.leak-scan.yml

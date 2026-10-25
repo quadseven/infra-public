@@ -1,0 +1,128 @@
+name: _reusable - fleet drift report
+
+# Weekly drift report across a list of repos (infra-public#167). Reads the
+# workflow and composite-action files of every repo in `repos`, takes the
+# majority value of each shared CI setting (action pins, GitHub-hosted runner
+# labels, `*-version` inputs, tool versions such as ruff, uv and actionlint),
+# and keeps one `Fleet drift: <repo>` issue per repo that differs, with
+# file:line and the exact change. A repo whose pin is newer than the majority
+# is never asked to downgrade, and a difference with no majority (two repos
+# that disagree, or values that do not order) is filed as a judgment call,
+# not a defect. The rules live in .github/scripts/fleet_drift.py.
+#
+# Flow: fetch the script from infra-public at `script-ref` -> read each repo's
+# files through the REST API (read-only) -> write the report to the job
+# summary -> create, rewrite or close the issues in `issue-repo` (skipped
+# when `dry-run` is true).
+#
+# Token: `secrets.token` when given, else the run's own GITHUB_TOKEN. The
+# run's token can read public repos and write issues only in the calling repo,
+# so a caller that lists private repos, or files into another repo, passes a
+# token from its own secrets that can read those repos and write issues where
+# they go. Keep a private list in a private caller: the job summary and the
+# issues name every repo in it.
+#
+# Example caller:
+#   jobs:
+#     drift:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.fleet-drift.yml@<sha>
+#       permissions: { contents: read, issues: write }
+#       with:
+#         repos: OWNER/one, OWNER/two, OWNER/three
+#       secrets:
+#         token: ${{ secrets.FLEET_READ_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      repos:
+        description: "The repos to compare, as owner/name, comma or whitespace separated. At least two."
+        required: true
+        type: string
+      issue-repo:
+        description: "owner/name of the tracker that holds the drift issues. Empty = the calling repo."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "true = write the report to the job summary and log the issue changes without making them."
+        required: false
+        type: boolean
+        default: false
+      script-ref:
+        description: "The infra-public branch, tag or SHA the report script is taken from."
+        required: false
+        type: string
+        default: "main"
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool (private)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 10
+    secrets:
+      token:
+        description: "Optional token that can read every listed repo and write issues in issue-repo. Defaults to the run's GITHUB_TOKEN."
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Check the script ref
+        id: rev
+        env:
+          SCRIPT_REF: ${{ inputs.script-ref }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SCRIPT_REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::script-ref '$SCRIPT_REF' is not a git ref"
+            exit 1
+          fi
+          echo "ref=$SCRIPT_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the report script
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          ref: ${{ steps.rev.outputs.ref }}
+          sparse-checkout: .github/scripts/fleet_drift.py
+          sparse-checkout-cone-mode: false
+          path: _tool
+          persist-credentials: false
+
+      - name: Read every repo's workflow files
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          python3 _tool/.github/scripts/fleet_drift.py fetch --repos "$REPOS" --out "$RUNNER_TEMP/fleet"
+
+      - name: Build the report
+        run: |
+          set -euo pipefail
+          python3 _tool/.github/scripts/fleet_drift.py report --root "$RUNNER_TEMP/fleet" \
+            --plan "$RUNNER_TEMP/plan.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, rewrite or close the drift issues
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          ISSUE_REPO: ${{ inputs.issue-repo || github.repository }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          args=(file --plan "$RUNNER_TEMP/plan.json" --issue-repo "$ISSUE_REPO")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python3 _tool/.github/scripts/fleet_drift.py "${args[@]}"
