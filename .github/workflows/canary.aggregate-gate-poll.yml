@@ -30,6 +30,8 @@ jobs:
     with:
       mode: poll
       ignore: "Grug - *"
+      # The fold canary skips this leg on purpose; any other skip fails.
+      allow-skipped: deploy-preview
       expected: |
         gate / aggregate
         test
