@@ -77,7 +77,7 @@ on:
         type: string
         default: "fold"
       needs-json:
-        description: "fold mode: the caller's `${{ toJSON(needs) }}`. Required in fold mode."
+        description: "fold mode: the caller's needs context as JSON, that is toJSON(needs) inside an expression. Required in fold mode."
         required: false
         type: string
         default: ""

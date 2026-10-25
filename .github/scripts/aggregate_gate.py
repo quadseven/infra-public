@@ -167,6 +167,41 @@ def latest_check_runs(check_runs: list[dict]) -> list[dict]:
     return list(best.values())
 
 
+def _judge_check_run(cr: dict, elapsed: float, rules: dict) -> tuple[str, str]:
+    """One check run -> ("ok" | "wait" | "fail", detail)."""
+    name = cr.get("name") or "<unnamed check>"
+    status = cr.get("status")
+    if status != "completed":
+        if status in NOT_STARTED_STATUSES and elapsed >= rules["start_timeout"]:
+            return "fail", f"{name}: never started ({status} after {int(elapsed)}s)"
+        return "wait", name
+    conclusion = cr.get("conclusion")
+    if conclusion == "success":
+        return "ok", name
+    if conclusion == "skipped":
+        if matches(name, rules["allow_skipped"]):
+            return "ok", name
+        return "fail", f"{name}: skipped (list it in allow-skipped if skipping is correct)"
+    if conclusion == "neutral":
+        if rules["allow_neutral"]:
+            return "ok", name
+        return "fail", f"{name}: neutral"
+    if conclusion in FAILING_CONCLUSIONS:
+        return "fail", f"{name}: {conclusion}"
+    return "fail", f"{name}: completed with no usable conclusion ({conclusion})"
+
+
+def _judge_status(st: dict) -> tuple[str, str]:
+    """One commit status -> ("ok" | "wait" | "fail", detail)."""
+    name = st.get("context") or "<unnamed status>"
+    state = st.get("state")
+    if state == "success":
+        return "ok", name
+    if state == "pending":
+        return "wait", name
+    return "fail", f"{name}: commit status {state}"
+
+
 def evaluate_checks(
     snapshot: Snapshot,
     *,
@@ -179,61 +214,31 @@ def evaluate_checks(
     start_timeout: float,
     settle: float,
 ) -> Verdict:
-    problems: list[str] = []
-    waiting: list[str] = []
-    seen: list[str] = []
-
+    rules = {
+        "allow_skipped": allow_skipped,
+        "allow_neutral": allow_neutral,
+        "start_timeout": start_timeout,
+    }
+    judged: list[tuple[str, str, str]] = []  # (name, outcome, detail)
     for cr in latest_check_runs(snapshot.check_runs):
         name = cr.get("name") or "<unnamed check>"
-        if is_own_run(cr, run_id) or matches(name, ignore):
-            continue
-        seen.append(name)
-        status = cr.get("status")
-        conclusion = cr.get("conclusion")
-        if status != "completed":
-            if status in NOT_STARTED_STATUSES and elapsed >= start_timeout:
-                problems.append(
-                    f"{name}: never started ({status} after {int(elapsed)}s)"
-                )
-            else:
-                waiting.append(name)
-            continue
-        if conclusion == "success":
-            continue
-        if conclusion == "skipped" and matches(name, allow_skipped):
-            continue
-        if conclusion == "neutral" and allow_neutral:
-            continue
-        if conclusion == "skipped":
-            problems.append(
-                f"{name}: skipped (list it in allow-skipped if skipping is correct)"
-            )
-        elif conclusion in FAILING_CONCLUSIONS or conclusion == "neutral":
-            problems.append(f"{name}: {conclusion}")
-        else:
-            problems.append(f"{name}: completed with no usable conclusion ({conclusion})")
-
+        if not is_own_run(cr, run_id) and not matches(name, ignore):
+            judged.append((name, *_judge_check_run(cr, elapsed, rules)))
     for st in snapshot.statuses:
         name = st.get("context") or "<unnamed status>"
-        if matches(name, ignore):
-            continue
-        seen.append(name)
-        state = st.get("state")
-        if state == "success":
-            continue
-        if state == "pending":
-            waiting.append(name)
-        else:
-            problems.append(f"{name}: commit status {state}")
+        if not matches(name, ignore):
+            judged.append((name, *_judge_status(st)))
 
-    for name in expected:
-        if not any(fnmatch.fnmatchcase(s, name) for s in seen):
-            if elapsed >= start_timeout:
-                problems.append(
-                    f"{name}: expected check never started ({int(elapsed)}s)"
-                )
-            else:
-                waiting.append(f"{name} (not started yet)")
+    seen = [name for name, _, _ in judged]
+    problems = [d for _, outcome, d in judged if outcome == "fail"]
+    waiting = [d for _, outcome, d in judged if outcome == "wait"]
+    for pattern in expected:
+        if any(fnmatch.fnmatchcase(s, pattern) for s in seen):
+            continue
+        if elapsed >= start_timeout:
+            problems.append(f"{pattern}: expected check never started ({int(elapsed)}s)")
+        else:
+            waiting.append(f"{pattern} (not started yet)")
 
     if problems:
         return Verdict("fail", problems, waiting)
@@ -282,12 +287,16 @@ def poll(
 
 class GitHubApi:
     def __init__(self, api_url: str, repo: str, token: str):
+        # Only https: the token is sent on every request, and urlopen would
+        # otherwise also accept file: or a custom scheme.
+        if not api_url.startswith("https://"):
+            raise GateInputError(f"GITHUB_API_URL must be an https URL (got {api_url!r})")
         self.api_url = api_url.rstrip("/")
         self.repo = repo
         self.token = token
 
     def _get(self, path: str) -> object:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310 - scheme checked https in __init__
             f"{self.api_url}{path}",
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -295,7 +304,7 @@ class GitHubApi:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - https only, see __init__
             return json.load(resp)
 
     def snapshot(self, sha: str) -> Snapshot:
@@ -362,50 +371,58 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     p.add_argument("--settle", type=float, default=float(env.get("GATE_SETTLE", "60")))
     args = parser.parse_args(argv)
 
+    runner = _run_fold if args.mode == "fold" else _run_poll
     try:
-        if args.mode == "fold":
-            raw = env.get("NEEDS_JSON", "")
-            if not raw.strip():
-                raise GateInputError("NEEDS_JSON is empty; pass needs-json: ${{ toJSON(needs) }}")
-            try:
-                needs = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise GateInputError(f"NEEDS_JSON is not valid JSON: {exc}") from exc
-            problems = evaluate_needs(
-                needs, parse_names(args.expected), parse_names(args.allow_skipped)
-            )
-            for name in sorted(needs):
-                leg = needs[name]
-                print(f"{name}: {leg.get('result') if isinstance(leg, dict) else leg}")
-            return report(problems, f"aggregate gate passed: {len(needs)} leg(s) succeeded")
-
-        missing = [k for k in ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "GATE_SHA") if not env.get(k)]
-        if missing:
-            raise GateInputError(f"missing environment: {', '.join(missing)}")
-        if args.start_timeout > args.timeout:
-            raise GateInputError("start-timeout is longer than timeout")
-        api = GitHubApi(env.get("GITHUB_API_URL", "https://api.github.com"), env["GITHUB_REPOSITORY"], env["GITHUB_TOKEN"])
-        sha = env["GATE_SHA"]
-        print(f"aggregate gate: waiting on the checks of {sha}")
-        verdict = poll(
-            fetch_with_retry(lambda: api.snapshot(sha), print),
-            clock=time.monotonic,
-            sleep=time.sleep,
-            interval=args.interval,
-            timeout=args.timeout,
-            log=print,
-            run_id=env.get("GITHUB_RUN_ID", ""),
-            expected=parse_names(args.expected),
-            ignore=parse_names(args.ignore),
-            allow_skipped=parse_names(args.allow_skipped),
-            allow_neutral=str(args.allow_neutral).lower() == "true",
-            start_timeout=args.start_timeout,
-            settle=args.settle,
-        )
-        return report(verdict.problems, "aggregate gate passed: every other check succeeded")
+        return runner(args, env)
     except GateInputError as exc:
         print(f"::error title=aggregate gate::cannot evaluate: {exc}")
         return EXIT_ERROR
+
+
+def _run_fold(args: argparse.Namespace, env) -> int:
+    raw = env.get("NEEDS_JSON", "")
+    if not raw.strip():
+        raise GateInputError("NEEDS_JSON is empty; pass needs-json: toJSON(needs)")
+    try:
+        needs = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GateInputError(f"NEEDS_JSON is not valid JSON: {exc}") from exc
+    problems = evaluate_needs(needs, parse_names(args.expected), parse_names(args.allow_skipped))
+    for name in sorted(needs):
+        leg = needs[name]
+        print(f"{name}: {leg.get('result') if isinstance(leg, dict) else leg}")
+    return report(problems, f"aggregate gate passed: {len(needs)} leg(s) succeeded")
+
+
+def _run_poll(args: argparse.Namespace, env) -> int:
+    missing = [k for k in ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "GATE_SHA") if not env.get(k)]
+    if missing:
+        raise GateInputError(f"missing environment: {', '.join(missing)}")
+    if args.start_timeout > args.timeout:
+        raise GateInputError("start-timeout is longer than timeout")
+    api = GitHubApi(
+        env.get("GITHUB_API_URL", "https://api.github.com"),
+        env["GITHUB_REPOSITORY"],
+        env["GITHUB_TOKEN"],
+    )
+    sha = env["GATE_SHA"]
+    print(f"aggregate gate: waiting on the checks of {sha}")
+    verdict = poll(
+        fetch_with_retry(lambda: api.snapshot(sha), print),
+        clock=time.monotonic,
+        sleep=time.sleep,
+        interval=args.interval,
+        timeout=args.timeout,
+        log=print,
+        run_id=env.get("GITHUB_RUN_ID", ""),
+        expected=parse_names(args.expected),
+        ignore=parse_names(args.ignore),
+        allow_skipped=parse_names(args.allow_skipped),
+        allow_neutral=str(args.allow_neutral).lower() == "true",
+        start_timeout=args.start_timeout,
+        settle=args.settle,
+    )
+    return report(verdict.problems, "aggregate gate passed: every other check succeeded")
 
 
 if __name__ == "__main__":

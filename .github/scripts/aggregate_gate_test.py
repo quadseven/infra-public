@@ -289,6 +289,12 @@ class Cli(unittest.TestCase):
                 code, _ = self.run_main(["fold"], {"NEEDS_JSON": raw})
                 self.assertEqual(code, EXIT_ERROR)
 
+    def test_poll_refuses_a_non_https_api(self):
+        env = {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY": "o/r", "GATE_SHA": "abc", "GITHUB_API_URL": "file:///etc"}
+        code, out = self.run_main(["poll"], env)
+        self.assertEqual(code, EXIT_ERROR)
+        self.assertIn("https", out)
+
     def test_poll_needs_its_environment(self):
         code, out = self.run_main(["poll"], {})
         self.assertEqual(code, EXIT_ERROR)
@@ -322,6 +328,13 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("NEEDS_JSON: ${{ inputs.needs-json }}", text)
         for block in re.findall(r"run: \|\n((?:          .*\n|\n)+)", text):
             self.assertNotIn("${{", block, "an input interpolated into run: text")
+
+    def test_no_expression_in_an_input_description(self):
+        # GitHub evaluates `${{ }}` even in a workflow_call description, and an
+        # unknown context there (needs) makes the whole workflow file invalid.
+        for line in REUSABLE.read_text().splitlines():
+            if line.strip().startswith("description:"):
+                self.assertNotIn("${{", line)
 
     def test_reusable_job_name_is_the_documented_check(self):
         self.assertIn("    name: aggregate\n", REUSABLE.read_text())

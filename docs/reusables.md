@@ -47,7 +47,7 @@ Run on PRs by: `canary.aggregate-gate-poll.yml`, `canary.aggregate-gate.yml`. Te
 | Name | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `mode` | string | no | `fold` | fold (default) = evaluate the caller's toJSON(needs). poll = wait for the commit's other check runs and statuses through the API. |
-| `needs-json` | string | no | ` ` | fold mode: the caller's `${{ toJSON(needs) }}`. Required in fold mode. |
+| `needs-json` | string | no | ` ` | fold mode: the caller's needs context as JSON, that is toJSON(needs) inside an expression. Required in fold mode. |
 | `expected` | string | no | ` ` | Comma- or newline-separated names that must be present. fold: job ids in needs. poll: check-run or status names (glob patterns allowed); one that has not appeared by start-timeout-minutes fails the gate. |
 | `allow-skipped` | string | no | ` ` | Comma- or newline-separated legs (globs) whose `skipped` result is correct and passes. Every other skipped leg fails the gate. |
 | `ignore` | string | no | ` ` | poll mode: comma- or newline-separated check-run or status names (globs) to leave out entirely, such as a review bot's checks. The gate's own workflow run is always left out. |
