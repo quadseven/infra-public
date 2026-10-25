@@ -29,8 +29,9 @@ leg dropped from `needs:` by mistake is caught.
 
 **poll**. The gate is its own workflow and waits, through the API, for the
 commit's other check runs and commit statuses. It ignores its own run and
-any name matching `ignore` (for example a review bot), fails fast on any
-other conclusion than `success`, fails a check still queued after
+any name matching `ignore` (for example a review bot), fails on any
+other conclusion than `success` once a second read an interval later
+confirms it, fails a check still queued after
 `start-timeout-minutes` and an `expected` name that never appeared, and
 fails anything still running at `wait-minutes`. Use it when the legs cannot
 be turned into called workflows (checks from other apps, other CI

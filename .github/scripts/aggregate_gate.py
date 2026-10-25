@@ -19,8 +19,10 @@ fold   The caller runs its gate workflows as jobs and passes `toJSON(needs)`.
 poll   The gate runs as its own workflow and reads the commit's check runs
        and commit statuses from the API, waiting for the others to finish.
        It ignores every check run of its own workflow run (by run id in the
-       check's details URL) plus any name matching --ignore. It fails as soon
-       as any other check concludes with something other than success, when
+       check's details URL) plus any name matching --ignore. It fails when any
+       other check concludes with something other than success and a second
+       read an interval later still says so (some apps rewrite a conclusion
+       just after posting it), when
        a check is still queued after --start-timeout ("never started"), when
        a name in --expected has not appeared by --start-timeout, or when
        anything is still running at --timeout. It passes only once every

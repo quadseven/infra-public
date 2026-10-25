@@ -22,8 +22,8 @@ name: _reusable - Aggregate gate (one required check, fails closed)
 #     in the results.
 #   poll. The gate is its own workflow and waits for the commit's other check
 #     runs and commit statuses through the API. It ignores its own workflow
-#     run and anything matching `ignore`, fails fast on any failing
-#     conclusion, fails a check still queued after `start-timeout-minutes`
+#     run and anything matching `ignore`, fails a failing conclusion
+#     that a second read an interval later confirms, fails a check still queued after `start-timeout-minutes`
 #     (never started) or an `expected` name that never appeared, and fails
 #     whatever is still running at `wait-minutes`. Needs `checks: read` and
 #     `statuses: read` on the caller's job.
