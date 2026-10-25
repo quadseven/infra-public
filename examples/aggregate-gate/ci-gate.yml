@@ -1,0 +1,48 @@
+# Template: copy to .github/workflows/ci-gate.yml in your repository.
+#
+# One workflow owns every push and pull_request event, with NO path filters
+# (a required check that never runs blocks the merge forever, and a path
+# filter is how it never runs). It calls each of the repo's gate workflows
+# as a job, then folds their results into `gate / aggregate`, the single
+# check your ruleset requires. See README.md next to this file.
+#
+# Each called workflow needs `on: workflow_call:` (keep its other triggers
+# or drop them; see "Migrating" in the README). Replace <sha> with a full
+# infra-public commit SHA.
+
+name: ci-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    uses: ./.github/workflows/lint.yml
+  test:
+    uses: ./.github/workflows/test.yml
+  docs:
+    # A leg that legitimately skips (here: only on pushes to main) must be
+    # listed in allow-skipped below, or the gate fails it.
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/docs.yml
+  gate:
+    # always(): without it this job is skipped when a leg fails, and a
+    # skipped required check counts as passing.
+    if: always()
+    needs: [docs, lint, test]
+    uses: quadseven/infra-public/.github/workflows/_reusable.aggregate-gate.yml@<sha>
+    with:
+      needs-json: ${{ toJSON(needs) }}
+      expected: lint, test, docs
+      allow-skipped: docs
+      # Pin the logic too (default is main):
+      # script-ref: <sha>

@@ -1,0 +1,59 @@
+name: Canary - Aggregate gate (fold)
+
+# Canary for _reusable.aggregate-gate.yml in fold mode, and the worked
+# example of a caller: several legs, one `gate / aggregate` check that a
+# ruleset could require in place of all of them. One leg is skipped on
+# purpose and listed in allow-skipped, so the canary proves an allowed skip
+# passes; the failing cases (failure, cancelled, an unlisted skip, a missing
+# leg) are pinned by .github/scripts/aggregate_gate_test.py.
+#
+# The gate job's `if: always()` is the part a copy must keep: without it the
+# gate is skipped when a leg fails, and a skipped required check passes.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/aggregate_gate.py"
+      - ".github/scripts/aggregate_gate_test.py"
+      - ".github/workflows/_reusable.aggregate-gate.yml"
+      - ".github/workflows/canary.aggregate-gate.yml"
+      - ".github/workflows/canary.aggregate-gate-poll.yml"
+      - ".github/workflows/check.aggregate-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "stand-in for a lint workflow"
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "stand-in for a test workflow"
+  deploy-preview:
+    # Skipped on purpose: shows a leg whose skip is correct, allowed below.
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "never runs"
+  gate:
+    if: always()
+    needs: [lint, test, deploy-preview]
+    uses: ./.github/workflows/_reusable.aggregate-gate.yml
+    with:
+      needs-json: ${{ toJSON(needs) }}
+      expected: lint, test, deploy-preview
+      allow-skipped: deploy-preview
+      # Take the script from the tree under review, so a logic change is
+      # exercised by the canary in the PR that changes it.
+      script-ref: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -20,6 +20,7 @@ names the test files under `.github/scripts/` that exercise its text.
 
 | Workflow | Run on PRs by | Tested by |
 | --- | --- | --- |
+| [`_reusable.aggregate-gate.yml`](#reusableaggregate-gateyml) | `canary.aggregate-gate-poll.yml`, `canary.aggregate-gate.yml` | `aggregate_gate_test.py` |
 | [`_reusable.ci-config-freshness.yml`](#reusableci-config-freshnessyml) | `self-ci-config-freshness.yml` | `ci_config_freshness_test.py` |
 | [`_reusable.fleet-drift.yml`](#reusablefleet-driftyml) | `self-fleet-drift.yml` | `fleet_drift_test.py` |
 | [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
@@ -34,6 +35,32 @@ names the test files under `.github/scripts/` that exercise its text.
 | [`deploy.pages.yml`](#deploypagesyml) | `canary.deploy-pages.yml` | - |
 | [`ship.python.yml`](#shippythonyml) | `canary.ship-python.yml` | - |
 | [`sync.public-repo-docs.yml`](#syncpublic-repo-docsyml) | - | `sync_docs_steps_test.py`, `workflow_hygiene_test.py` |
+
+## _reusable.aggregate-gate.yml
+
+_reusable - Aggregate gate (one required check, fails closed). Source: [`.github/workflows/_reusable.aggregate-gate.yml`](../.github/workflows/_reusable.aggregate-gate.yml).
+
+Run on PRs by: `canary.aggregate-gate-poll.yml`, `canary.aggregate-gate.yml`. Tested by: `.github/scripts/aggregate_gate_test.py`.
+
+### Inputs
+
+| Name | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `mode` | string | no | `fold` | fold (default) = evaluate the caller's toJSON(needs). poll = wait for the commit's other check runs and statuses through the API. |
+| `needs-json` | string | no | ` ` | fold mode: the caller's needs context as JSON, that is toJSON(needs) inside an expression. Required in fold mode. |
+| `expected` | string | no | ` ` | Comma- or newline-separated names that must be present. fold: job ids in needs. poll: check-run or status names (glob patterns allowed); one that has not appeared by start-timeout-minutes fails the gate. |
+| `allow-skipped` | string | no | ` ` | Comma- or newline-separated legs (globs) whose `skipped` result is correct and passes. Every other skipped leg fails the gate. |
+| `ignore` | string | no | ` ` | poll mode: comma- or newline-separated check-run or status names (globs) to leave out entirely, such as a review bot's checks. The gate's own workflow run is always left out. |
+| `allow-neutral` | boolean | no | `false` | poll mode: true = a `neutral` conclusion passes. Default false: neutral is not a proven success. |
+| `sha` | string | no | ` ` | poll mode: commit to read checks from. Empty = the pull request head, else github.sha. |
+| `wait-minutes` | number | no | `60` | poll mode: fail whatever is still not finished after this many minutes. |
+| `start-timeout-minutes` | number | no | `10` | poll mode: fail a check still queued, or an expected name not yet seen, after this many minutes. |
+| `settle-seconds` | number | no | `60` | poll mode: do not pass before this many seconds, so a workflow that queues just after the gate is still seen. |
+| `poll-interval-seconds` | number | no | `30` | poll mode: seconds between API reads (two requests per read). |
+| `script-ref` | string | no | `main` | infra-public revision to take aggregate_gate.py from. Default `main`. Set a SHA to pin the logic as well as the workflow. infra-public's own canaries pass their PR head SHA. |
+| `runner` | string | no | `ubuntu-latest` | Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool. |
+| `timeout-minutes` | number | no | `75` | Job timeout. In poll mode keep it above wait-minutes. |
+
 
 ## _reusable.ci-config-freshness.yml
 
