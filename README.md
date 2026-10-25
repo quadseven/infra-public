@@ -40,6 +40,7 @@ you can copy.
 | `_reusable.smoke-test.yml` | curl a list of endpoints with retries and assert status and body |
 | `_reusable.upstream-drift-check.yml` | open an issue when a pinned upstream repo moves past its pin |
 | `_reusable.leak-scan.yml` | refuse a PR, issue or tree that carries private identifiers (hostnames, private IPs, local paths, names) |
+| `_reusable.ci-config-freshness.yml` | fail a PR whose branch is missing CI config commits (workflows, actions, rulesets, validation contract) that landed on the base after it forked; see [`docs/ci-config-freshness.md`](docs/ci-config-freshness.md) |
 | `check.issue-close-completeness.yml` | reopen an issue closed as completed while its checkboxes are unticked |
 | `sync.public-repo-docs.yml` | open a PR that syncs a repo's `AGENTS.md`/`CLAUDE.md` with `templates/public-repo/` |
 
@@ -78,6 +79,9 @@ None is needed for the lint, test and build-only paths.
   `.loom/validation.conf` lists only commands a pull-request workflow
   really runs, and with `--run` runs them.
 - `.github/scripts/reusable_docs.py` - generates `docs/reusables.md`.
+- `.github/scripts/ci_config_freshness.py` - the check behind
+  `_reusable.ci-config-freshness.yml`: lists base-branch commits to CI
+  config after the merge-base. `--base`, `--head`, `--paths`.
 - `python/spark_cave/` - a stdlib-only Python library for a queue-based
   job handoff between a cloud service and an on-prem worker. See its
   [README](python/spark_cave/README.md).

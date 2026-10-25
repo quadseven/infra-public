@@ -1,0 +1,164 @@
+name: _reusable - CI config freshness (PR branch has the base's CI changes)
+
+# PURPOSE: fail a pull request whose branch is missing changes to CI config
+#   that landed on the base branch after the PR forked (infra-public#168).
+#
+# WHY. A pull_request run uses the workflows on the PR's own branch. When the
+#   base gains a new or stricter gate - a workflow, a composite action, a
+#   ruleset, the validation contract - after the PR branched off, the PR keeps
+#   running the old gates and can go green on rules the base no longer
+#   accepts. "Require branches to be up to date" fixes that by forcing a
+#   rebase for every base commit; this is the narrow version, which fails only
+#   when the base moved a watched CI path after the merge-base.
+#
+# HOW. .github/scripts/ci_config_freshness.py, fetched from infra-public at
+#   `script-ref`, compares the PR HEAD COMMIT (github.event.pull_request.head
+#   .sha) with the base branch's CURRENT tip (origin/<base>, fetched at
+#   checkout time). Not the default pull_request checkout: that is the merge
+#   ref, which already contains the base, so the check would always pass.
+#   Not github.event.pull_request.base.sha either: that is the base as of the
+#   event, so a re-run would not see newer base commits.
+#
+# FAIL CLOSED. A merge-base that cannot be computed (shallow history, a ref
+#   that does not resolve, no common history), a missing script or an
+#   unsupported event is a red check, never a green one.
+#
+# WHEN IT RUNS. GitHub does not re-run PR checks when only the base branch
+#   moves. The check re-evaluates on every push to the PR, on reopen, and on
+#   a manual re-run; a merge queue or a pre-merge re-run of this check is what
+#   catches a base change that lands while the PR sits idle.
+#
+# Consumed cross-repo as
+# `uses: quadseven/infra-public/.github/workflows/_reusable.ci-config-freshness.yml@<sha>`.
+# All actions SHA-pinned. No `permissions:` block here: the caller grants
+# `contents: read`, which is all this needs.
+#
+# Example caller (.github/workflows/ci-config-freshness.yml in the consuming repo):
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#   jobs:
+#     freshness:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.ci-config-freshness.yml@<sha>
+#       permissions: { contents: read }
+#       # with:
+#       #   paths: ".github/workflows/,.github/actions/,ci/"   # replace the default list
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: "Comma- or newline-separated paths that count as CI config; a commit on the base touching any of them after the merge-base fails the check. Empty = the script's defaults: .github/workflows/, .github/actions/, .github/rulesets/, .loom/validation.conf."
+        required: false
+        type: string
+        default: ""
+      base-ref:
+        description: "Base branch name to compare with. Empty = the PR's base branch (github.base_ref)."
+        required: false
+        type: string
+        default: ""
+      script-ref:
+        description: "infra-public revision to take ci_config_freshness.py from. Default `main`. Set a SHA to pin the script as well as the workflow."
+        required: false
+        type: string
+        default: "main"
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 5
+
+jobs:
+  freshness:
+    name: PR branch has the base's CI config changes
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: ci-config-freshness-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: "1. Refuse an event that has no PR head and base"
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # pull_request_target is refused: it runs with the base repo's
+          # token, and a freshness check gains nothing from that token.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "::error::ci-config-freshness supports pull_request only (got '$EVENT')."
+            exit 1
+          fi
+
+      - name: "2. Resolve the base branch and the script revision"
+        id: refs
+        env:
+          INPUT_BASE: ${{ inputs.base-ref }}
+          PR_BASE: ${{ github.base_ref }}
+          SCRIPT_REF: ${{ inputs.script-ref }}
+        run: |
+          set -euo pipefail
+          base="${INPUT_BASE:-$PR_BASE}"
+          for pair in "base-ref=$base" "script-ref=$SCRIPT_REF"; do
+            name="${pair%%=*}"
+            value="${pair#*=}"
+            if [ -z "$value" ]; then
+              echo "::error::$name is empty."
+              exit 1
+            fi
+            # Both become git refs. Anything outside a ref's character set
+            # is refused rather than passed through.
+            if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+              echo "::error::$name '$value' contains characters that are not valid in a git ref"
+              exit 1
+            fi
+          done
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "script=$SCRIPT_REF" >> "$GITHUB_OUTPUT"
+          echo "comparing the PR head with origin/$base; script from quadseven/infra-public@$SCRIPT_REF"
+
+      - name: "3. Checkout the PR head commit with full history"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          path: _repo
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "4. Fetch the script at that revision"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: quadseven/infra-public
+          ref: ${{ steps.refs.outputs.script }}
+          sparse-checkout: .github/scripts/ci_config_freshness.py
+          sparse-checkout-cone-mode: false
+          path: _tool
+          persist-credentials: false
+
+      - name: "5. Compare the PR head with the base branch tip"
+        env:
+          TOOL: ${{ github.workspace }}/_tool/.github/scripts/ci_config_freshness.py
+          REPO_DIR: ${{ github.workspace }}/_repo
+          BASE: ${{ steps.refs.outputs.base }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+          # A sparse-checkout that matched nothing leaves an empty directory
+          # and exits 0; without this the failure would read as a python
+          # error, not as the check being absent.
+          if [ ! -s "$TOOL" ]; then
+            echo "::error::ci_config_freshness.py was not fetched (expected $TOOL). Failing closed."
+            exit 1
+          fi
+          args=(--repo "$REPO_DIR" --base "origin/$BASE" --head "$HEAD_SHA" --github)
+          # `--paths=` form: a value starting with `-` reaches the script's
+          # own refusal instead of being read as another option.
+          if [ -n "$PATHS" ]; then
+            args+=("--paths=$PATHS")
+          fi
+          python3 "$TOOL" "${args[@]}"

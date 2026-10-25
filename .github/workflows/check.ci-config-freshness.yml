@@ -1,0 +1,38 @@
+name: check - CI config freshness guard
+
+# Gates the CI config freshness script (.github/scripts/ci_config_freshness.py)
+# behind its fixture suite (infra-public#168). The script is fetched at run
+# time by _reusable.ci-config-freshness.yml and runs as a blocking check in
+# every consuming repo, so the suite pins the fail-closed paths (shallow
+# clone, unknown ref, no common history) as well as the matching, and runs
+# the reusable's compare step as written.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/ci_config_freshness.py"
+      - ".github/scripts/ci_config_freshness_test.py"
+      - ".github/workflows/_reusable.ci-config-freshness.yml"
+      - ".github/workflows/check.ci-config-freshness.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/ci_config_freshness.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Fixture suite for the CI config freshness check"
+        run: python3 .github/scripts/ci_config_freshness_test.py

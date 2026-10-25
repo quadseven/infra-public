@@ -1,0 +1,30 @@
+name: ci-config-freshness
+
+# Thin caller for this repo's own reusable CI config freshness check
+# (infra-public#168): a PR here fails while main has workflow, action,
+# ruleset or validation-contract commits the PR branch does not have. See
+# _reusable.ci-config-freshness.yml for the mechanism and for what a
+# consuming repo's caller looks like.
+#
+# No path filter, on purpose: a PR that touches only docs can still be
+# stale on the gates that check docs.
+#
+# The reusable is called by local path and the script is taken from the PR
+# head, so a change to either is exercised by the check it changes, in the PR
+# that changes it. Consumer repos pin the workflow by SHA and take the script
+# from main.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    uses: ./.github/workflows/_reusable.ci-config-freshness.yml
+    permissions:
+      contents: read
+    with:
+      script-ref: ${{ github.event.pull_request.head.sha }}
