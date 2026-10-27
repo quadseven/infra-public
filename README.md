@@ -8,7 +8,12 @@ own repository with your own runners, registries and credentials.
 Read [`AGENTS.md`](AGENTS.md) before contributing: this repository is
 public, and that file is the rule for everything written to it.
 
-## Calling a reusable workflow
+## What it does
+
+The repository provides reusable workflows, validation scripts and examples
+for building, testing and deploying projects.
+
+## Quick start
 
 Pin to a full commit SHA, never a branch or tag:
 
@@ -25,6 +30,18 @@ Every input, secret and output of every reusable is listed in
 workflows and CI fails when it is stale, so it is the reference to trust.
 The `canary.*.yml` workflows in `.github/workflows/` are working callers
 you can copy.
+
+## How it works
+
+```mermaid
+flowchart LR
+  Caller[Caller repository] --> Workflow[Reusable workflow]
+  Workflow --> Guards[Validation scripts]
+  Guards --> Result[Check result]
+```
+
+The caller supplies workflow inputs. Reusable workflows run the guard scripts
+and return their results to the caller's checks.
 
 ## Reusable workflows
 
@@ -46,7 +63,15 @@ you can copy.
 | `check.issue-close-completeness.yml` | reopen an issue closed as completed while its checkboxes are unticked |
 | `sync.public-repo-docs.yml` | open a PR that syncs a repo's `AGENTS.md`/`CLAUDE.md` with `templates/public-repo/` |
 
-## What you bring
+## Run and test locally
+
+Run the pull-request validation contract with Python 3.11 or later and Node 24:
+
+```sh
+python3 .github/scripts/validation_contract.py --run
+```
+
+## Configuration
 
 Some paths need infrastructure that does not ship with this repository.
 None is needed for the lint, test and build-only paths.
@@ -88,14 +113,12 @@ None is needed for the lint, test and build-only paths.
   job handoff between a cloud service and an on-prem worker. See its
   [README](python/spark_cave/README.md).
 
-## Running the checks locally
+## Status
 
-Every check CI runs on a pull request is listed, in order, in
-[`.loom/validation.conf`](.loom/validation.conf). To run them all:
+Open work is tracked in the [repository goal](https://github.com/quadseven/infra-public/issues/114).
 
-```sh
-python3 .github/scripts/validation_contract.py --run
-```
+## Contributing
 
-It needs Python 3.11 or later and Node 24. `python/spark_cave` has its own
-suite: from that directory, `uv run --frozen pytest -q`.
+Changes land through pull requests. Run the validation contract and leak scan;
+CI checks the workflows and generated documentation. Read [AGENTS.md](AGENTS.md)
+before contributing.
