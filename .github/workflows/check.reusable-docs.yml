@@ -4,7 +4,9 @@ name: check - reusable workflow docs
 # .github/scripts/reusable_docs.py (infra-public#137). This fails a PR that
 # changes a reusable's inputs, secrets or outputs, or which PR workflows run
 # it, without regenerating the page, so the page a stranger reads cannot
-# drift from what the workflow accepts.
+# drift from what the workflow accepts. The same job holds README.md to the
+# public README standard (templates/public-repo/README-STANDARD.md,
+# #179).
 
 on:
   pull_request:
@@ -12,6 +14,7 @@ on:
       - ".github/workflows/**"
       - ".github/scripts/**"
       - "docs/reusables.md"
+      - "README.md"
   push:
     branches: [main]
     paths:
@@ -37,3 +40,5 @@ jobs:
         run: python3 .github/scripts/reusable_docs_test.py
       - name: "The reusables reference is current"
         run: python3 .github/scripts/reusable_docs.py --check
+      - name: "README follows the public README standard"
+        run: python3 .github/scripts/readme_standard_test.py

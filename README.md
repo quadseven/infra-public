@@ -10,8 +10,13 @@ public, and that file is the rule for everything written to it.
 
 ## What it does
 
-The repository provides reusable workflows, validation scripts and examples
-for building, testing and deploying projects.
+1. Reusable workflows that lint, test, build and ship a project: Python,
+   Rust, container images, Kubernetes and GitHub Pages.
+2. Guard workflows that refuse leaked private identifiers and stale CI
+   config, reopen issues closed with unticked boxes, and report CI settings
+   that drift across a fleet of repos.
+3. The scripts behind those guards, runnable on any checkout, and working
+   example callers to copy.
 
 ## Quick start
 
@@ -35,13 +40,18 @@ you can copy.
 
 ```mermaid
 flowchart LR
-  Caller[Caller repository] --> Workflow[Reusable workflow]
-  Workflow --> Guards[Validation scripts]
-  Guards --> Result[Check result]
+  Caller[Caller workflow] -->|inputs, secrets| Workflow[Reusable workflow]
+  Workflow --> Guards[Guard scripts]
+  Workflow --> Infra[Caller's registry, cluster or Pages site]
+  Guards --> Result[Check result on the caller's PR]
+  Gen[reusable_docs.py] --> Ref[docs/reusables.md]
 ```
 
-The caller supplies workflow inputs. Reusable workflows run the guard scripts
-and return their results to the caller's checks.
+A caller workflow in your repository names a reusable workflow by commit SHA
+and passes inputs and secrets. The reusable workflow runs the guard scripts
+in `.github/scripts/` and, for the build and deploy paths, talks to the
+infrastructure you supply. Results come back as checks on the caller's pull
+request. `reusable_docs.py` generates the reference page from the workflows.
 
 ## Reusable workflows
 
@@ -65,11 +75,17 @@ and return their results to the caller's checks.
 
 ## Run and test locally
 
-Run the pull-request validation contract with Python 3.11 or later and Node 24:
+Every check CI runs on a pull request is listed, in order, in
+[`.loom/validation.conf`](.loom/validation.conf). To run them all:
 
 ```sh
 python3 .github/scripts/validation_contract.py --run
 ```
+
+It needs Python 3.11 or later and Node 24. CI runs the same contract on every
+pull request that touches it (`check.loom-validation.yml`).
+`python/spark_cave` has its own suite: from that directory,
+`uv run --frozen pytest -q`.
 
 ## Configuration
 
@@ -119,6 +135,14 @@ Open work is tracked in the [repository goal](https://github.com/quadseven/infra
 
 ## Contributing
 
-Changes land through pull requests. Run the validation contract and leak scan;
-CI checks the workflows and generated documentation. Read [AGENTS.md](AGENTS.md)
-before contributing.
+Changes land through a pull request; direct pushes to `main` are refused.
+A pull request must pass the leak scan, the CI config freshness check,
+CodeQL, the workflow checks in the validation contract and review by
+`grug-tribe[bot]`. Before opening one, run the contract and the leak scanner:
+
+```sh
+python3 .github/scripts/validation_contract.py --run
+python3 .github/scripts/check_private_leaks.py --staged
+```
+
+Read [AGENTS.md](AGENTS.md) first: this repository is public.
