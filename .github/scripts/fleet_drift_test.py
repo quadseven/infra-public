@@ -35,6 +35,7 @@ from fleet_drift import (  # noqa: E402
     fetch,
     file_issues,
     main,
+    repo_files,
     runner_compare,
     scan,
     settings,
@@ -403,6 +404,32 @@ class Cli(unittest.TestCase):
     def test_bad_repo_name_is_refused(self):
         with self.assertRaises(SystemExit):
             main(["fetch", "--repos", "not-a-repo", "--out", "x"])
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class OwnPins(unittest.TestCase):
+    """This repo's own workflows sit at the fleet majority (infra-public#174).
+
+    The weekly report filed every `actions/checkout` pin here as behind the
+    fleet at v5.0.1 while the fleet ran v6.0.2. Read the pins the same way
+    the report does, so a pin that slides back is caught in CI, not a week
+    later in a drift issue.
+    """
+
+    def test_checkout_is_at_least_the_fleet_majority(self):
+        files = repo_files(REPO_ROOT)
+        self.assertTrue(files, "no workflow files found under the repo root")
+        behind = []
+        for f in files:
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            for occ in extract("self", rel, f.read_text(encoding="utf-8")):
+                if occ.key != "action:actions/checkout":
+                    continue
+                if occ.ref != CHECKOUT_V6 and compare(occ.value, "v6.0.2") != 1:
+                    behind.append(f"{rel}:{occ.line} {occ.value}")
+        self.assertEqual(behind, [])
 
 
 if __name__ == "__main__":
