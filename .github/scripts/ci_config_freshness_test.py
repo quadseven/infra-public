@@ -93,8 +93,9 @@ def run_main(*argv: str) -> tuple[int, str, str]:
 
 class Fixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="ci-freshness-"))
-        self.addCleanup(shutil.rmtree, self.tmp)
+        temp = tempfile.TemporaryDirectory(prefix="ci-freshness-")
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
         self.repo = Repo(self.tmp / "repo")
         self.repo.branch("pr")
         self.repo.commit("feature work", {"src/app.py": "print(1)\n"})
@@ -334,8 +335,9 @@ class Workflow(unittest.TestCase):
     """The reusable as written: the checkout it does and the step it runs."""
 
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="ci-freshness-wf-"))
-        self.addCleanup(shutil.rmtree, self.tmp)
+        temp = tempfile.TemporaryDirectory(prefix="ci-freshness-wf-")
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
         # The layout the workflow builds: the caller at _repo with an origin
         # remote (as actions/checkout leaves it), the script at _tool.
         upstream = Repo(self.tmp / "upstream")
@@ -366,7 +368,7 @@ class Workflow(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         ws = self.tmp / "ws"
         return subprocess.run(
-            ["bash", "-e", "-c", step_script("5.")],
+            [shutil.which("bash") or "bash", "-e", "-c", step_script("5.")],
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 **GIT_ENV,

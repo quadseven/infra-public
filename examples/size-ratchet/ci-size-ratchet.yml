@@ -1,0 +1,13 @@
+# Replace REVIEWED_COMMIT_SHA in both places before adoption.
+name: size ratchet
+on:
+  pull_request:
+  push:
+    branches: [main]  # Set this to your default branch.
+jobs:
+  ratchet:
+    permissions:
+      contents: write
+    uses: quadseven/infra-public/.github/workflows/_reusable.size-ratchet.yml@REVIEWED_COMMIT_SHA
+    with:
+      script-ref: REVIEWED_COMMIT_SHA

@@ -108,7 +108,7 @@ class IssueComment(unittest.TestCase):
         self.scan.write_text(scan_output.format(path=self.tmp / "text.md"))
         _, script = step(COMMENT_STEP)
         done = subprocess.run(
-            ["bash", "-e", "-c", script],
+            [shutil.which("bash") or "bash", "-e", "-c", script],
             env={
                 "PATH": self.path,
                 "GH_LOG": str(self.log),
