@@ -387,7 +387,7 @@ class RepoContract(unittest.TestCase):
         }
         scripts = REPO_ROOT / ".github" / "scripts"
         found = sorted(
-            str(p.relative_to(REPO_ROOT))
+            p.relative_to(REPO_ROOT).as_posix()
             for pattern in ("*_test.py", "*.test.js")
             for p in scripts.rglob(pattern)
             if "fixtures" not in p.relative_to(scripts).parts

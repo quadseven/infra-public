@@ -24,6 +24,7 @@ names the test files under `.github/scripts/` that exercise its text.
 | [`_reusable.ci-config-freshness.yml`](#reusableci-config-freshnessyml) | `self-ci-config-freshness.yml` | `ci_config_freshness_test.py` |
 | [`_reusable.fleet-drift.yml`](#reusablefleet-driftyml) | `self-fleet-drift.yml` | `fleet_drift_test.py` |
 | [`_reusable.leak-scan.yml`](#reusableleak-scanyml) | `self-leak-scan.yml` | `leak_scan_steps_test.py` |
+| [`_reusable.size-ratchet.yml`](#reusablesize-ratchetyml) | - | `size_ratchet_test.py` |
 | [`_reusable.smoke-test.yml`](#reusablesmoke-testyml) | `canary.smoke-test.yml` | - |
 | [`_reusable.upstream-drift-check.yml`](#reusableupstream-drift-checkyml) | `canary.upstream-drift-check.yml` | `workflow_hygiene_test.py` |
 | [`build.container-multiarch.yml`](#buildcontainer-multiarchyml) | `canary.ship-python.yml` | - |
@@ -128,6 +129,21 @@ Run on PRs by: `self-leak-scan.yml`. Tested by: `.github/scripts/leak_scan_steps
 | Name | Required | Description |
 | --- | --- | --- |
 | `aws-role-arn` | no | IAM role ARN to assume (OIDC) for the deny-list read. Passed as a secret so the account-id-bearing ARN stays masked. Required when deny-list-ssm-param is set or use-shared-deny-list is true. |
+
+
+## _reusable.size-ratchet.yml
+
+_reusable - size ratchet. Source: [`.github/workflows/_reusable.size-ratchet.yml`](../.github/workflows/_reusable.size-ratchet.yml).
+
+Run on PRs by: nothing in this repository. Tested by: `.github/scripts/size_ratchet_test.py`.
+
+### Inputs
+
+| Name | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `script-ref` | string | yes |  | infra-public revision containing size_ratchet.py. Pin a reviewed commit SHA. |
+| `policy` | string | no | `.size-ratchet.json` | Repository-relative JSON policy; read from the base commit only. |
+| `records` | string | no | `.size-ratchet-records.json` | Repository-relative JSON records; read from the base commit only. |
 
 
 ## _reusable.smoke-test.yml

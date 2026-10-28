@@ -80,7 +80,7 @@ GNU_SED_PATH = _gnu_sed_path()
 def run(script: str, env: dict[str, str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     base = {"PATH": GNU_SED_PATH or os.environ.get("PATH", "/usr/bin:/bin")}
     return subprocess.run(
-        ["bash", "-e", "-c", script],
+        [shutil.which("bash") or "bash", "-e", "-c", script],
         env={**base, **env},
         cwd=cwd,
         capture_output=True,

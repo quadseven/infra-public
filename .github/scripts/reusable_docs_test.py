@@ -147,6 +147,8 @@ class Coverage(unittest.TestCase):
         self.assertEqual(sorted(found), ["example.yml", "outer.yml"])
         self.assertEqual(found["example.yml"].exercised_by, ["canary.yml"])
         self.assertEqual(found["example.yml"].tested_by, [".github/scripts/x_test.py"])
+        self.assertEqual(found["example.yml"].path, ".github/workflows/example.yml")
+        self.assertIn("../.github/workflows/example.yml", render([found["example.yml"]]))
         self.assertEqual(found["outer.yml"].exercised_by, ["canary.yml"])
 
     def test_rendered_page_escapes_pipes_and_is_ascii(self):

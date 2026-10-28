@@ -199,13 +199,13 @@ def load(root: Path) -> list[Reusable]:
         block = workflow_call_block(lines)
         if block is None:
             continue
-        where = f"{WF_DIR / name}"
+        where = (WF_DIR / name).as_posix()
         title = next((scalar(m.group(1)) for ln in lines if (m := NAME_RE.match(ln))), name)
         reusables.append(Reusable(where, to_ascii(title, where), parse_sections(block, where)))
     pr_workflows = [n for n, t in texts.items() if is_pull_request_workflow(t.splitlines())]
     scripts = root / ".github" / "scripts"
     tests = {
-        str(p.relative_to(root)): p.read_text()
+        p.relative_to(root).as_posix(): p.read_text()
         for pattern in TEST_GLOBS
         for p in sorted(scripts.rglob(pattern))
         if "fixtures" not in p.relative_to(scripts).parts
