@@ -817,6 +817,117 @@ class PersonalDataCli(unittest.TestCase):
         path.write_text("--- a/t\n+++ b/t\n+pat.synthetic@corp.invalid\n")
         self.assertEqual(run().returncode, 1)
 
+    def commits(self, rng):
+        return subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--diff", rng, "--personal-data",
+             "--deny-list-ssm", "/x/y"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True,
+        )
+
+    def test_diff_refuses_a_value_added_then_removed(self):
+        base, _ = self.commit_text("pat.synthetic@corp.invalid\n")
+        _, head = self.commit_text("clean\n")
+        out = self.commits(f"{base}..{head}")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertNotIn("pat.synthetic", out.stdout + out.stderr)
+
+    def test_diff_reads_commit_messages_with_their_bullets(self):
+        base = self.head()
+        (self.repo / "a.txt").write_text("message\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "title\n\n- owner pat.synthetic@corp.invalid")
+        out = self.commits(f"{base}..HEAD")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_diff_skips_what_the_other_side_of_a_three_dot_range_gained(self):
+        self.git("checkout", "-qb", "upstream")
+        self.commit_text("pat.synthetic@corp.invalid\n")
+        self.git("checkout", "-q", "-")
+        (self.repo / "b.txt").write_text("clean\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "mine")
+        out = self.commits("upstream...HEAD")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_diff_with_a_bad_range_is_not_clean(self):
+        out = self.commits("nosuch..HEAD")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_pre_push_refuses_a_value_added_then_removed(self):
+        base, _ = self.commit_text("pat.synthetic@corp.invalid\n")
+        _, head = self.commit_text("clean\n")
+        out = self.pre_push(f"refs/heads/b {head} refs/heads/b {base}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def merge_with_message(self, message, content=None):
+        """A merge of a side branch. `content` is committed into the merge itself."""
+        base = self.head()
+        self.git("checkout", "-qb", "side")
+        (self.repo / "side.txt").write_text("side\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "side")
+        self.git("checkout", "-q", "-")
+        (self.repo / "main.txt").write_text("main\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "main")
+        self.git("merge", "-q", "--no-commit", "--no-ff", "side")
+        if content:
+            (self.repo / "evil.txt").write_text(content)
+            self.git("add", ".")
+        self.git("commit", "-qm", message)
+        return base
+
+    def test_a_merge_commit_message_is_scanned(self):
+        base = self.merge_with_message("merge for pat.synthetic@corp.invalid")
+        self.assertEqual(self.commits(f"{base}..HEAD").returncode, 1)
+
+    def test_content_added_only_in_a_merge_is_scanned_after_removal(self):
+        base = self.merge_with_message("merge", content="pat.synthetic@corp.invalid\n")
+        self.git("rm", "-q", "evil.txt")
+        self.git("commit", "-qm", "gone")
+        out = self.commits(f"{base}..HEAD")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_a_ref_update_with_no_commits_is_not_clean(self):
+        head = self.head()
+        out = self.pre_push(f"refs/heads/b {head} refs/heads/b {head}\n")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_require_changes_is_honoured_on_pre_push(self):
+        out = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--pre-push", "--personal-data",
+             "--deny-list-ssm", "/x/y", "--require-changes"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True,
+            input=f"(delete) {'0' * 40} refs/heads/gone {'a' * 40}\n",
+        )
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_a_file_marked_binary_is_still_read(self):
+        base = self.head()
+        (self.repo / ".gitattributes").write_text("*.dat binary\n")
+        (self.repo / "x.dat").write_text("pat.synthetic@corp.invalid\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "data")
+        out = self.commits(f"{base}..HEAD")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        (self.repo / "y.dat").write_text("pat.synthetic@corp.invalid\n")
+        self.git("add", ".")
+        staged = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--staged", "--personal-data",
+             "--deny-list-ssm", "/x/y"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True,
+        )
+        self.assertEqual(staged.returncode, 1, staged.stdout + staged.stderr)
+
+    def test_a_textconv_filter_does_not_hide_a_value(self):
+        base = self.head()
+        self.git("config", "diff.hide.textconv", "true")
+        (self.repo / ".gitattributes").write_text("*.dat diff=hide\n")
+        (self.repo / "x.dat").write_text("pat.synthetic@corp.invalid\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "data")
+        self.assertEqual(self.commits(f"{base}..HEAD").returncode, 1)
+
     def test_tree_reports_path_and_line_only(self):
         (self.repo / "b.txt").write_text("ok\nkim.synthetic" + "@gmail.com\n")
         self.git("add", ".")

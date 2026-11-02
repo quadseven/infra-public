@@ -50,7 +50,7 @@ EXIT CODES (a contract - the reusable workflow's warn mode depends on it)
 
 USAGE
     check_private_leaks.py --staged                     # pre-commit: staged diff
-    check_private_leaks.py --diff BASE...HEAD           # CI: a PR's diff
+    check_private_leaks.py --diff BASE...HEAD           # CI: a PR's diff and commits
     check_private_leaks.py --text-file body.md          # an issue/PR body
     check_private_leaks.py --tree                       # every tracked file
     check_private_leaks.py --pre-push --personal-data   # a git pre-push hook
@@ -312,7 +312,6 @@ def build_patterns(
     return rules + PERSONAL_RULES
 
 
-EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 DENY = "deny-list"  # rule name for layer-2 hits; scan() redacts these
 HOUSEHOLD = "personal-deny-list"  # the same, for a mail or street value
 REDACTED_RULES = (DENY, HOUSEHOLD, PERSONAL)
@@ -494,7 +493,7 @@ def git_diff(args: list[str]) -> str:
     diff instead of a decode traceback.
     """
     out = subprocess.run(
-        ["git", "diff", "-U0", *args],
+        ["git", "diff", "-U0", "--text", "--no-textconv", "--no-ext-diff", *args],
         capture_output=True,
         text=True,
         errors="replace",
@@ -513,13 +512,52 @@ def git_diff(args: list[str]) -> str:
 BINARY_SNIFF = 8192
 
 
-def pre_push_diff(refs: str) -> str:
-    """The diff of what a push adds, from git's pre-push stdin.
+def git_read(args: list[str]) -> str:
+    """Run a read-only git command; any failure is fatal, as for git_diff."""
+    out = subprocess.run(["git", *args], capture_output=True, errors="replace", text=True)
+    if out.returncode != 0:
+        print(
+            f"FATAL: `git {' '.join(args)}` failed: {out.stderr.strip()}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return out.stdout
 
-    A new branch is scanned from its merge base with origin/HEAD, or from the
-    empty tree when there is none. A remote commit this clone lacks exits 2.
+
+def commit_list(spec: str) -> list[str]:
+    """The commits of a range, merges included; one side only for BASE...HEAD."""
+    side = ["--right-only"] if "..." in spec else []
+    return git_read(["rev-list", *side, spec]).split()
+
+
+def scan_commits(shas: list[str], rules) -> list[str]:
+    """Scan each commit's patch and message. The net diff of a range cannot
+    see a value added in one commit and removed in the next, which still
+    reaches the remote in history. A message line is scanned as plain text:
+    a leading `-` there is a bullet, not a removal. --remerge-diff shows what
+    a merge itself changed, which plain `show` omits. --text and --no-textconv
+    keep gitattributes from turning content into "Binary files differ", so
+    no file is skipped."""
+    hits: list[str] = []
+    for sha in shas:
+        label = sha[:12]
+        patch = git_read(
+            ["show", "-U0", "--format=", "--no-color", "--no-ext-diff", "--text",
+             "--no-textconv", "--remerge-diff", sha]
+        )
+        hits += scan(patch, rules, label=f"{label} patch", diff_mode=True)
+        message = git_read(["log", "-1", "--format=%B", sha])
+        hits += scan(message, rules, label=f"{label} message")
+    return hits
+
+
+def pre_push_commits(refs: str) -> list[str]:
+    """The commits a push adds, from git's pre-push stdin.
+
+    A new branch counts from its merge base with origin/HEAD, or all its
+    history when there is none. A remote commit this clone lacks exits 2.
     """
-    text = []
+    shas: list[str] = []
     for line in refs.splitlines():
         fields = line.split()
         if len(fields) != 4:
@@ -535,13 +573,17 @@ def pre_push_diff(refs: str) -> str:
                 capture_output=True,
                 text=True,
             )
-            base = (
-                merge_base.stdout.strip()
-                if merge_base.returncode == 0
-                else EMPTY_TREE
+            base = merge_base.stdout.strip() if merge_base.returncode == 0 else ""
+        found = commit_list(f"{base}..{local}" if base else local)
+        if not found:
+            print(
+                f"FATAL: the ref update to {local} has no commit to scan, so "
+                "the scan saw nothing; fetch, or push through a pull request",
+                file=sys.stderr,
             )
-        text.append(git_diff([base, local]))
-    return "".join(text)
+            raise SystemExit(2)
+        shas += found
+    return shas
 
 
 def tree_files() -> list[str]:
@@ -614,11 +656,47 @@ def scan_tree(paths: list[str], rules) -> tuple[list[str], int, int]:
     return hits, lines, binaries
 
 
+def report(hits: list[str], coverage: str, personal_only: bool) -> int:
+    """Print the findings and the advice for them. Always exits 1."""
+    print(
+        f"BLOCKED: private infrastructure identifiers found ({coverage})\n",
+        file=sys.stderr,
+    )
+    for h in hits:
+        print(h, file=sys.stderr)
+    print(
+        "\nA [personal-data] or [personal-deny-list] hit is a real person's mail\n"
+        "or street address. Use example.com and an invented value instead. Only\n"
+        f"a [personal-data] line may carry the marker '{PERSONAL_ALLOW_MARKER}'.",
+        file=sys.stderr,
+    )
+    if personal_only:
+        return 1
+    print(
+        "\nThis repo is PUBLIC. Hostnames, node names, private-range IPs, real\n"
+        "device identifiers, local user paths and cross-repo issue refs identify\n"
+        "infrastructure and people even when they contain no secret. Describe the\n"
+        "shape instead: 'an arm64 node', 'the infrastructure repo', 'a tailnet\n"
+        "host'. See templates/public-repo/AGENTS.md for the full rule.\n"
+        "\nA [deny-list] hit is a term with no generic shape - a person, a\n"
+        "product, a host codename - and its text is deliberately NOT echoed\n"
+        "here. Open the line above in your own diff to see it.\n"
+        "\nIf a hit is genuinely fine, add the marker 'leak-guard-allow' to that\n"
+        "line - deliberately noisy, so the exemption is visible in review.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--staged", action="store_true", help="scan the staged diff")
-    src.add_argument("--diff", help="scan `git diff <RANGE>` (use BASE...HEAD)")
+    src.add_argument(
+        "--diff",
+        help="scan `git diff <RANGE>` (use BASE...HEAD) and each commit of a "
+        "range, patch and message",
+    )
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
     src.add_argument("--diff-file", help="scan a saved diff, such as `gh pr diff`")
     src.add_argument(
@@ -645,7 +723,7 @@ def main() -> int:
     ap.add_argument(
         "--require-changes",
         action="store_true",
-        help="with --diff/--staged: exit 2 if the diff is empty, so a "
+        help="with --diff/--staged/--pre-push: exit 2 if nothing is there, so a "
         "scan that saw nothing cannot report clean",
     )
     ap.add_argument(
@@ -710,15 +788,23 @@ def main() -> int:
             print(h, file=sys.stderr)
         return 1
 
+    if args.pre_push:
+        shas = pre_push_commits(sys.stdin.read())
+        if args.require_changes and not shas:
+            print("FATAL: --require-changes was set but the push adds nothing", file=sys.stderr)
+            return 2
+        hits = scan_commits(shas, rules)
+        if not hits:
+            print(f"leak guard: clean ({coverage}, {len(shas)} commits scanned)")
+            return 0
+        return report(hits, coverage, args.personal_data)
+
     if args.staged:
         text = git_diff(["--cached"])
         label = "staged"
     elif args.diff:
         text = git_diff([args.diff])
         label = args.diff
-    elif args.pre_push:
-        text = pre_push_diff(sys.stdin.read())
-        label = "push"
     else:
         label = args.text_file or args.diff_file
         try:
@@ -738,38 +824,15 @@ def main() -> int:
         return 2
 
     hits = scan(text, rules, label=label, diff_mode=not args.text_file)
+    # A range also gets each commit: a value added and then removed is not in
+    # the net diff above, and it still reaches the remote in history.
+    if args.diff and ".." in args.diff:
+        hits += scan_commits(commit_list(args.diff), rules)
     if not hits:
         print(f"leak guard: clean ({coverage}, {len(text.splitlines())} lines scanned)")
         return 0
 
-    print(
-        f"BLOCKED: private infrastructure identifiers found ({coverage})\n",
-        file=sys.stderr,
-    )
-    for h in hits:
-        print(h, file=sys.stderr)
-    print(
-        "\nA [personal-data] or [personal-deny-list] hit is a real person's mail\n"
-        "or street address. Use example.com and an invented value instead. Only\n"
-        f"a [personal-data] line may carry the marker '{PERSONAL_ALLOW_MARKER}'.",
-        file=sys.stderr,
-    )
-    if args.personal_data:
-        return 1
-    print(
-        "\nThis repo is PUBLIC. Hostnames, node names, private-range IPs, real\n"
-        "device identifiers, local user paths and cross-repo issue refs identify\n"
-        "infrastructure and people even when they contain no secret. Describe the\n"
-        "shape instead: 'an arm64 node', 'the infrastructure repo', 'a tailnet\n"
-        "host'. See templates/public-repo/AGENTS.md for the full rule.\n"
-        "\nA [deny-list] hit is a term with no generic shape - a person, a\n"
-        "product, a host codename - and its text is deliberately NOT echoed\n"
-        "here. Open the line above in your own diff to see it.\n"
-        "\nIf a hit is genuinely fine, add the marker 'leak-guard-allow' to that\n"
-        "line - deliberately noisy, so the exemption is visible in review.",
-        file=sys.stderr,
-    )
-    return 1
+    return report(hits, coverage, args.personal_data)
 
 
 if __name__ == "__main__":
