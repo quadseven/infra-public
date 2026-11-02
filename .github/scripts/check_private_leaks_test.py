@@ -672,6 +672,40 @@ class PersonalData(unittest.TestCase):
         for street in streets:
             self.assertEqual(len(scan(f"at {street}, town", RULES, label="t")), 1, street)
 
+    def test_ordinal_street_with_a_direction_and_unit_is_refused(self):
+        # The shape that slipped through: a house number, a direction, an
+        # ordinal street name, a type, a unit, then city, state and ZIP.
+        streets = (
+            "4821 W 87th Ave Apt 12B",  # personal-data-allow
+            "77 NE 3rd St, Unit 4",  # personal-data-allow
+            "310 South 1st Street Suite 200",  # personal-data-allow
+            "9 22nd Pl #5",  # personal-data-allow
+            "15A N. 101st Terrace Ste. 3",  # personal-data-allow
+        )
+        for street in streets:
+            self.assertEqual(len(scan(f"ship to {street}", RULES, label="t")), 1, street)
+
+    def test_city_state_zip_line_is_refused(self):
+        for line in (
+            "Springfield, OR 97000",  # personal-data-allow
+            "Lake Placeholder, WA 98000-1234",  # personal-data-allow
+            "New Fakeburg,NY 10000",  # personal-data-allow
+        ):
+            hits = scan(line, RULES, label="t")
+            self.assertEqual(len(hits), 1, line)
+            self.assertIn("redacted", hits[0], line)
+
+    def test_ordinals_and_state_codes_in_prose_are_not_addresses(self):
+        for line in (
+            "the 3rd St patch landed in 2 days",
+            "ran 5 21st century tests",
+            "Merged, PR 12345 is green",
+            "Step 2, OR 3 if it fails",
+            "Seattle, WA is 3 hours away",
+            "build 12 1st try",
+        ):
+            self.assertEqual(scan(line, RULES, label="t"), [], line)
+
     def test_placeholder_and_bot_addresses_pass(self):
         for line in (
             "a@example.com",

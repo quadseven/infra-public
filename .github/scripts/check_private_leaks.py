@@ -75,8 +75,10 @@ Real people's mail and street addresses have no place in any repo, private
 ones included: a private repo is still copied to every clone, runner and
 model. Two rule kinds serve that, on in every mode:
 
-  [personal-data]       generic shapes: a personal-mail domain and a US street
-                        address. Placeholder domains and bot mailboxes pass.
+  [personal-data]       generic shapes: a personal-mail domain, a US street
+                        address (ordinal streets, directions and a unit
+                        included) and a `City, ST 12345` line. Placeholder
+                        domains and bot mailboxes pass.
                         The marker 'personal-data-allow' exempts one line; the
                         generic leak markers do not.
   [personal-deny-list]  household values: the deny-list terms with an `@`, or
@@ -214,14 +216,29 @@ PERSONAL_MAIL = re.compile(
     re.I,
 )
 # Case-sensitive on purpose: capitals are what separate an address from prose.
+# A street name is a capitalized word or an ordinal (the numbered streets of a
+# grid city); a unit (apartment, unit, suite, `#`) may follow the type.
 STREET_ADDRESS = re.compile(
-    r"\b\d{1,6}\s+(?:[NSEW]\.?\s+)?(?:[A-Z][a-z]+\s+){1,4}"
+    r"\b\d{1,6}[A-Z]?\s+"
+    r"(?:(?:[NSEW]|NE|NW|SE|SW)\.?\s+|(?:North|South|East|West)\s+)?"
+    r"(?:(?:[A-Z][a-z]+|\d{1,4}(?:st|nd|rd|th))\s+){1,4}"
     r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct"
     r"|Terrace|Ter|Circle|Cir|Highway|Hwy|Parkway|Pkwy|Place|Pl|Way)\b"
+    r"(?:\.?,?\s*(?:Apt|Apartment|Unit|Suite|Ste|#)\.?\s*[A-Za-z0-9-]+)?"
+)
+# The city, state and ZIP line of a mailing address: `City, ST 12345[-6789]`.
+# PR (Puerto Rico) is left out: `Merged, PR 12345` is fleet prose, not an address.
+US_STATES = (
+    "AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO"
+    "|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY"
+)
+CITY_STATE_ZIP = re.compile(
+    r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2},\s*(?:" + US_STATES + r")\s+\d{5}(?:-\d{4})?\b"
 )
 PERSONAL_RULES: list[tuple[str, re.Pattern[str], str]] = [
     (PERSONAL, PERSONAL_MAIL, "a personal mail address"),
     (PERSONAL, STREET_ADDRESS, "a street address"),
+    (PERSONAL, CITY_STATE_ZIP, "a city, state and ZIP line"),
 ]
 
 # The cross-repo-ref rule is not in PATTERNS because it is not a constant: the
