@@ -37,7 +37,9 @@ from pathlib import Path
 from unittest import mock
 
 from check_private_leaks import (
+    PERSONAL_ALLOW_MARKER,
     build_patterns,
+    deny_rules,
     deny_rule,
     load_ssm_deny_list,
     parse_deny_list,
@@ -619,6 +621,215 @@ class TreeMode(unittest.TestCase):
         self._commit({"a.md": b"x\n"})
         out = self._cli("--text-file", "a.md")
         self.assertEqual(out.returncode, 2)
+
+class PersonalData(unittest.TestCase):
+    """Synthetic values only. Every fixture address here is invented, so the
+    lines carry the marker for the scan of this file, not for any real value."""
+
+    HOUSEHOLD = deny_rules(
+        ["pat.synthetic@corp.invalid", "742 Evergreen Terrace"]  # personal-data-allow
+    )
+
+    def hits(self, line):
+        return scan(line, RULES + self.HOUSEHOLD, label="t")
+
+    def test_household_address_is_refused_and_never_echoed(self):
+        hits = self.hits("owner = pat.synthetic@corp.invalid")
+        self.assertEqual(len(hits), 1)
+        self.assertNotIn("pat.synthetic", hits[0])
+        self.assertIn("redacted", hits[0])
+
+    def test_household_street_is_refused(self):
+        self.assertEqual(len(self.hits("ship to 742 evergreen terrace")), 1)
+
+    def test_no_marker_exempts_a_household_value(self):
+        for marker in (PERSONAL_ALLOW_MARKER, "leak-guard-allow", "check_private_leaks"):
+            self.assertEqual(
+                len(self.hits(f"pat.synthetic@corp.invalid  # {marker}")), 1, marker
+            )
+
+    def test_personal_mail_shape_is_refused_and_never_echoed(self):
+        for domain in ("gmail.com", "GMAIL.COM", "googlemail.com", "icloud.com",
+                       "yahoo.co.uk", "outlook.com", "proton.me"):
+            hits = scan(f"'kim.synthetic@{domain}': 'Kim'", RULES, label="t")
+            self.assertEqual(len(hits), 1, domain)
+            self.assertNotIn("kim.synthetic", hits[0], domain)
+
+    def test_a_generic_marker_does_not_exempt_a_personal_shape(self):
+        line = "kim.synthetic" + "@gmail.com  # leak-guard-allow"
+        self.assertEqual(len(scan(line, RULES, label="t")), 1)
+
+    def test_the_personal_marker_exempts_a_personal_shape(self):
+        line = "kim.synthetic" + f"@gmail.com  # {PERSONAL_ALLOW_MARKER}"
+        self.assertEqual(scan(line, RULES, label="t"), [])
+
+    def test_street_shape_is_refused(self):
+        streets = (
+            "1600 Fictional Avenue",  # personal-data-allow
+            "12 N Oak Hollow Rd",  # personal-data-allow
+            "9 Old Mill Lane",  # personal-data-allow
+        )
+        for street in streets:
+            self.assertEqual(len(scan(f"at {street}, town", RULES, label="t")), 1, street)
+
+    def test_placeholder_and_bot_addresses_pass(self):
+        for line in (
+            "a@example.com",
+            "b@sub.example.org",
+            "12345+agent[bot]@users.noreply.github.com",
+            "noreply@gmail.com",
+            "no-reply@googlemail.com",
+            "mailer-daemon@googlemail.com",
+            "git@github.com:owner/name.git",
+        ):
+            self.assertEqual(scan(line, RULES, label="t"), [], line)
+
+    def test_ordinary_prose_is_not_a_street(self):
+        for line in ("took 5 minutes on the way", "line 12 of main.py"):
+            self.assertEqual(scan(line, RULES, label="t"), [], line)
+
+    def test_a_scrub_is_never_refused(self):
+        diff = "--- a/t\n+++ b/t\n-pat.synthetic@corp.invalid\n"
+        self.assertEqual(scan(diff, RULES + self.HOUSEHOLD, label="d", diff_mode=True), [])
+
+
+class PersonalDataCli(unittest.TestCase):
+    """--personal-data, the mode a private repo runs: only personal rules, so
+    a private repo's own hosts and names stay legal there."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "r"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        (self.repo / "a.txt").write_text("x\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "base")
+        bindir = Path(self.tmp.name) / "bin"
+        bindir.mkdir()
+        fake = bindir / "aws"
+        fake.write_text(
+            "#!/bin/sh\n"
+            "printf 'Fakeproduct\\npat.synthetic@corp.invalid\\n"
+            "742 Evergreen Terrace\\n"  # personal-data-allow
+            "lee.synthetic" "@gmail.com\\n'\n"
+        )
+        fake.chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+        self.env.pop("GITHUB_REPOSITORY", None)
+
+    def git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, check=True)
+
+    def run_cli(self, text, *extra):
+        (self.repo / "a.txt").write_text(text)
+        self.git("add", ".")
+        return subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--staged", "--personal-data",
+             "--deny-list-ssm", "/x/y", *extra],
+            cwd=self.repo, env=self.env, capture_output=True, text=True,
+        )
+
+    def test_private_repo_names_stay_legal(self):
+        out = self.run_cli("Fakeproduct on srv-host-01 at 10.0.0.1 infra#12\n")  # leak-guard-allow
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("3 household terms", out.stdout)
+
+    def test_household_value_is_refused_without_echo(self):
+        out = self.run_cli("pat.synthetic@corp.invalid\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertNotIn("pat.synthetic", out.stdout + out.stderr)
+
+    def test_a_household_value_outranks_the_shape_and_its_marker(self):
+        out = self.run_cli(f"lee.synthetic" + f"@gmail.com  # {PERSONAL_ALLOW_MARKER}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("[personal-deny-list]", out.stderr)
+
+    def test_personal_shape_is_refused(self):
+        out = self.run_cli("kim.synthetic" + "@gmail.com\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_unreadable_list_is_not_clean(self):
+        (Path(self.tmp.name) / "bin" / "aws").write_text("#!/bin/sh\nexit 9\n")
+        out = self.run_cli("x2\n")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_a_list_with_no_household_value_is_not_clean(self):
+        (Path(self.tmp.name) / "bin" / "aws").write_text("#!/bin/sh\necho Fakeproduct\n")
+        out = self.run_cli("x3\n")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def pre_push(self, stdin):
+        return subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--pre-push", "--personal-data",
+             "--deny-list-ssm", "/x/y"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, input=stdin,
+        )
+
+    def commit_text(self, text):
+        base = self.head()
+        (self.repo / "a.txt").write_text(text)
+        self.git("add", ".")
+        self.git("commit", "-qm", "change")
+        return base, self.head()
+
+    def head(self):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    def test_pre_push_refuses_what_the_range_adds(self):
+        base, head = self.commit_text("pat.synthetic@corp.invalid\n")
+        out = self.pre_push(f"refs/heads/b {head} refs/heads/b {base}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertNotIn("pat.synthetic", out.stdout + out.stderr)
+
+    def test_pre_push_scans_a_new_branch_from_the_empty_tree(self):
+        _, head = self.commit_text("pat.synthetic@corp.invalid\n")
+        out = self.pre_push(f"refs/heads/b {head} refs/heads/b {'0' * 40}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_pre_push_passes_a_branch_delete_and_a_clean_range(self):
+        base, head = self.commit_text("clean\n")
+        stdin = (
+            f"(delete) {'0' * 40} refs/heads/gone {base}\n"
+            f"refs/heads/b {head} refs/heads/b {base}\n"
+        )
+        out = self.pre_push(stdin)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_pre_push_with_an_unknown_remote_commit_is_not_clean(self):
+        _, head = self.commit_text("clean\n")
+        out = self.pre_push(f"refs/heads/b {head} refs/heads/b {'a' * 40}\n")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_diff_file_reads_a_saved_diff_as_a_diff(self):
+        path = Path(self.tmp.name) / "pr.diff"
+        path.write_text("--- a/t\n+++ b/t\n-pat.synthetic@corp.invalid\n+clean\n")
+        args = [sys.executable, "-B", str(SCRIPT), "--personal-data",
+                "--deny-list-ssm", "/x/y", "--diff-file", str(path)]
+        run = lambda: subprocess.run(args, env=self.env, capture_output=True, text=True)
+        self.assertEqual(run().returncode, 0)
+        path.write_text("--- a/t\n+++ b/t\n+pat.synthetic@corp.invalid\n")
+        self.assertEqual(run().returncode, 1)
+
+    def test_tree_reports_path_and_line_only(self):
+        (self.repo / "b.txt").write_text("ok\nkim.synthetic" + "@gmail.com\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "two")
+        out = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--tree", "--personal-data",
+             "--deny-list-ssm", "/x/y"],
+            cwd=self.repo, env=self.env, capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("b.txt:2", out.stderr)
+        self.assertNotIn("kim.synthetic", out.stdout + out.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

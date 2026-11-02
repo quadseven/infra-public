@@ -53,6 +53,7 @@ USAGE
     check_private_leaks.py --diff BASE...HEAD           # CI: a PR's diff
     check_private_leaks.py --text-file body.md          # an issue/PR body
     check_private_leaks.py --tree                       # every tracked file
+    check_private_leaks.py --pre-push --personal-data   # a git pre-push hook
     check_private_leaks.py --diff A...B --allow-repo-ref my-org/my-repo
     check_private_leaks.py --text-file b.md --deny-list-ssm /path/to/param
 
@@ -67,6 +68,23 @@ index of every private identifier left in the repo. The path and line number
 are enough to find it. Binary files (a NUL byte in the first 8 KiB) are
 skipped and counted. `git ls-files` failing, or listing no files, exits 2: a
 sweep that looked at nothing must not report clean.
+
+PERSONAL DATA (--personal-data)
+-------------------------------
+Real people's mail and street addresses have no place in any repo, private
+ones included: a private repo is still copied to every clone, runner and
+model. Two rule kinds serve that, on in every mode:
+
+  [personal-data]       generic shapes: a personal-mail domain and a US street
+                        address. Placeholder domains and bot mailboxes pass.
+                        The marker 'personal-data-allow' exempts one line; the
+                        generic leak markers do not.
+  [personal-deny-list]  household values: the deny-list terms with an `@`, or
+                        starting with a house number. No marker exempts these.
+
+--personal-data turns the other rules off, so a private repo's own hosts and
+names stay legal there. With --deny-list-ssm it needs at least one household
+term; a list that has none exits 2. Every personal hit is redacted.
 
 RELATIONSHIP TO grug's COPY
 ---------------------------
@@ -180,6 +198,32 @@ PATTERNS: list[tuple[str, str, str]] = [
     ),
 ]
 
+PERSONAL = "personal-data"  # rule name for the generic personal shapes
+PERSONAL_ALLOW_MARKER = "personal-data-allow"
+
+# Generic shapes, safe to read publicly. No fixture value belongs in this repo.
+PERSONAL_MAIL = re.compile(
+    r"(?<![\w.+-])"
+    r"(?!(?:no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?)@)"
+    r"[a-z0-9][a-z0-9._%+-]*@"
+    r"(?:gmail\.com|googlemail\.com|(?:yahoo|ymail|hotmail|outlook|live)(?:\.[a-z]{2,3}){1,2}"
+    r"|msn\.com|icloud\.com|me\.com|mac\.com|aol\.com|proton\.me|protonmail\.(?:com|ch)"
+    r"|pm\.me|fastmail\.(?:com|fm)|hey\.com|gmx\.(?:com|de|net)|zoho\.com|mail\.com"
+    r"|comcast\.net|verizon\.net|att\.net|sbcglobal\.net|cox\.net|charter\.net)"
+    r"(?![\w-])",  # personal-data-allow: the pattern itself
+    re.I,
+)
+# Case-sensitive on purpose: capitals are what separate an address from prose.
+STREET_ADDRESS = re.compile(
+    r"\b\d{1,6}\s+(?:[NSEW]\.?\s+)?(?:[A-Z][a-z]+\s+){1,4}"
+    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct"
+    r"|Terrace|Ter|Circle|Cir|Highway|Hwy|Parkway|Pkwy|Place|Pl|Way)\b"
+)
+PERSONAL_RULES: list[tuple[str, re.Pattern[str], str]] = [
+    (PERSONAL, PERSONAL_MAIL, "a personal mail address"),
+    (PERSONAL, STREET_ADDRESS, "a street address"),
+]
+
 # The cross-repo-ref rule is not in PATTERNS because it is not a constant: the
 # caller's allow-list is spliced into it per run. An `<owner>/<repo>` entry may
 # be referenced as `<owner>/<repo>#123` or `<repo>#123`, a bare `<repo>` entry
@@ -265,10 +309,14 @@ def build_patterns(
             REPO_REF_WHY,
         )
     )
-    return rules
+    return rules + PERSONAL_RULES
 
 
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 DENY = "deny-list"  # rule name for layer-2 hits; scan() redacts these
+HOUSEHOLD = "personal-deny-list"  # the same, for a mail or street value
+REDACTED_RULES = (DENY, HOUSEHOLD, PERSONAL)
+HOUSEHOLD_TERM = re.compile(r"@|^\d+\s+\S")
 
 
 def parse_deny_list(raw: str) -> list[str]:
@@ -302,6 +350,25 @@ def deny_rule(term: str) -> re.Pattern[str]:
     lead = r"(?<![0-9A-Za-z_])" if (term[0].isalnum() or term[0] == "_") else ""
     trail = r"(?![0-9A-Za-z_])" if (term[-1].isalnum() or term[-1] == "_") else ""
     return re.compile(lead + re.escape(term) + trail, re.I)
+
+
+def deny_rules(terms: list[str]) -> list[tuple[str, re.Pattern[str], str]]:
+    """Compile deny-list terms, telling household values from the rest."""
+    return [
+        (HOUSEHOLD, deny_rule(t), "a household mail or street value")
+        if HOUSEHOLD_TERM.search(t)
+        else (DENY, deny_rule(t), "an explicitly denied term")
+        for t in terms
+    ]
+
+
+def exempt(rule: str, payload: str) -> bool:
+    """Whether a line's marker waives a rule. Household values have no waiver."""
+    if rule == HOUSEHOLD:
+        return False
+    if rule == PERSONAL:
+        return PERSONAL_ALLOW_MARKER in payload
+    return any(m in payload for m in ALLOW_MARKERS)
 
 
 def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
@@ -359,7 +426,7 @@ def load_ssm_deny_list(param: str) -> list[tuple[str, re.Pattern[str], str]]:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    return [(DENY, deny_rule(t), "an explicitly denied term") for t in terms]
+    return deny_rules(terms)
 
 
 def scan(
@@ -400,18 +467,16 @@ def scan(
                 payload = line[1:] if line.startswith("+") else line
         else:
             payload = line
-        if any(m in payload for m in ALLOW_MARKERS):
-            continue
         for name, rx, why in rules:
             m = rx.search(payload)
-            if m:
+            if m and not exempt(name, payload):
                 # A layer-2 hit is NEVER echoed: this prints to a PUBLIC
                 # Actions log, and echoing the match would republish the very
                 # term the deny-list exists to keep out. The line number is
                 # enough - the author is looking at their own diff or text.
                 shown = (
                     f"<redacted, {len(m.group(0))} chars>"
-                    if name == DENY or redact_all
+                    if name in REDACTED_RULES or redact_all
                     else repr(m.group(0))
                 )
                 hits.append(f"  {label}:{lineno}  [{name}] {shown} - {why}")
@@ -446,6 +511,37 @@ def git_diff(args: list[str]) -> str:
 
 
 BINARY_SNIFF = 8192
+
+
+def pre_push_diff(refs: str) -> str:
+    """The diff of what a push adds, from git's pre-push stdin.
+
+    A new branch is scanned from its merge base with origin/HEAD, or from the
+    empty tree when there is none. A remote commit this clone lacks exits 2.
+    """
+    text = []
+    for line in refs.splitlines():
+        fields = line.split()
+        if len(fields) != 4:
+            print(f"FATAL: unreadable pre-push line: {line!r}", file=sys.stderr)
+            raise SystemExit(2)
+        _, local, _, remote = fields
+        if not local.strip("0"):
+            continue  # a branch delete adds nothing
+        base = remote
+        if not remote.strip("0"):
+            merge_base = subprocess.run(
+                ["git", "merge-base", "origin/HEAD", local],
+                capture_output=True,
+                text=True,
+            )
+            base = (
+                merge_base.stdout.strip()
+                if merge_base.returncode == 0
+                else EMPTY_TREE
+            )
+        text.append(git_diff([base, local]))
+    return "".join(text)
 
 
 def tree_files() -> list[str]:
@@ -524,6 +620,12 @@ def main() -> int:
     src.add_argument("--staged", action="store_true", help="scan the staged diff")
     src.add_argument("--diff", help="scan `git diff <RANGE>` (use BASE...HEAD)")
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
+    src.add_argument("--diff-file", help="scan a saved diff, such as `gh pr diff`")
+    src.add_argument(
+        "--pre-push",
+        action="store_true",
+        help="scan what a push adds, from git's pre-push stdin",
+    )
     src.add_argument(
         "--tree",
         action="store_true",
@@ -546,20 +648,43 @@ def main() -> int:
         help="with --diff/--staged: exit 2 if the diff is empty, so a "
         "scan that saw nothing cannot report clean",
     )
+    ap.add_argument(
+        "--personal-data",
+        action="store_true",
+        help="check personal mail and street addresses only, for a private repo",
+    )
     args = ap.parse_args()
 
-    rules = build_patterns(args.allow_repo_ref + actions_repository())
+    rules = (
+        list(PERSONAL_RULES)
+        if args.personal_data
+        else build_patterns(args.allow_repo_ref + actions_repository())
+    )
     n_shapes = len(rules)
     n_deny = 0
+    n_household = 0
     if args.deny_list_ssm:
         deny = load_ssm_deny_list(args.deny_list_ssm)
+        n_household = sum(rule[0] == HOUSEHOLD for rule in deny)
+        if args.personal_data:
+            deny = [rule for rule in deny if rule[0] == HOUSEHOLD]
+            if not deny:
+                print(
+                    f"FATAL: deny-list {args.deny_list_ssm} holds no household "
+                    "term; refusing to run with that layer inert",
+                    file=sys.stderr,
+                )
+                return 2
         n_deny = len(deny)
-        rules += deny
+        # Household rules first: a line a shape would also hit reports the
+        # rule no marker can waive.
+        rules = sorted(rules + deny, key=lambda rule: rule[0] != HOUSEHOLD)
     # Say what is loaded on EVERY run, pass or fail. grug's guard printed
     # "clean" for months while its people-matching half was never switched
     # on, and nothing in the output said so.
     coverage = (
-        f"{n_shapes} shape patterns, {n_deny} deny-list terms"
+        f"{n_shapes} shape patterns, {n_deny} deny-list terms, "
+        f"{n_household} household terms"
         if args.deny_list_ssm
         else f"{n_shapes} shape patterns, deny-list not configured "
         "(names and products are not being checked)"
@@ -591,14 +716,17 @@ def main() -> int:
     elif args.diff:
         text = git_diff([args.diff])
         label = args.diff
+    elif args.pre_push:
+        text = pre_push_diff(sys.stdin.read())
+        label = "push"
     else:
+        label = args.text_file or args.diff_file
         try:
-            with open(args.text_file, encoding="utf-8", errors="replace") as fh:
+            with open(label, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except OSError as exc:
-            print(f"FATAL: could not read {args.text_file}: {exc}", file=sys.stderr)
+            print(f"FATAL: could not read {label}: {exc}", file=sys.stderr)
             return 2
-        label = args.text_file
 
     if args.require_changes and not text.strip():
         print(
@@ -609,7 +737,7 @@ def main() -> int:
         )
         return 2
 
-    hits = scan(text, rules, label=label, diff_mode=args.staged or bool(args.diff))
+    hits = scan(text, rules, label=label, diff_mode=not args.text_file)
     if not hits:
         print(f"leak guard: clean ({coverage}, {len(text.splitlines())} lines scanned)")
         return 0
@@ -620,6 +748,14 @@ def main() -> int:
     )
     for h in hits:
         print(h, file=sys.stderr)
+    print(
+        "\nA [personal-data] or [personal-deny-list] hit is a real person's mail\n"
+        "or street address. Use example.com and an invented value instead. Only\n"
+        f"a [personal-data] line may carry the marker '{PERSONAL_ALLOW_MARKER}'.",
+        file=sys.stderr,
+    )
+    if args.personal_data:
+        return 1
     print(
         "\nThis repo is PUBLIC. Hostnames, node names, private-range IPs, real\n"
         "device identifiers, local user paths and cross-repo issue refs identify\n"
