@@ -620,6 +620,7 @@ def main() -> int:
     src.add_argument("--staged", action="store_true", help="scan the staged diff")
     src.add_argument("--diff", help="scan `git diff <RANGE>` (use BASE...HEAD)")
     src.add_argument("--text-file", help="scan a file (an issue/PR body)")
+    src.add_argument("--diff-file", help="scan a saved diff, such as `gh pr diff`")
     src.add_argument(
         "--pre-push",
         action="store_true",
@@ -719,13 +720,13 @@ def main() -> int:
         text = pre_push_diff(sys.stdin.read())
         label = "push"
     else:
+        label = args.text_file or args.diff_file
         try:
-            with open(args.text_file, encoding="utf-8", errors="replace") as fh:
+            with open(label, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except OSError as exc:
-            print(f"FATAL: could not read {args.text_file}: {exc}", file=sys.stderr)
+            print(f"FATAL: could not read {label}: {exc}", file=sys.stderr)
             return 2
-        label = args.text_file
 
     if args.require_changes and not text.strip():
         print(
@@ -736,7 +737,7 @@ def main() -> int:
         )
         return 2
 
-    hits = scan(text, rules, label=label, diff_mode=args.staged or args.pre_push or bool(args.diff))
+    hits = scan(text, rules, label=label, diff_mode=not args.text_file)
     if not hits:
         print(f"leak guard: clean ({coverage}, {len(text.splitlines())} lines scanned)")
         return 0

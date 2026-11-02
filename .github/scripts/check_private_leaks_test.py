@@ -807,6 +807,16 @@ class PersonalDataCli(unittest.TestCase):
         out = self.pre_push(f"refs/heads/b {head} refs/heads/b {'a' * 40}\n")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
+    def test_diff_file_reads_a_saved_diff_as_a_diff(self):
+        path = Path(self.tmp.name) / "pr.diff"
+        path.write_text("--- a/t\n+++ b/t\n-pat.synthetic@corp.invalid\n+clean\n")
+        args = [sys.executable, "-B", str(SCRIPT), "--personal-data",
+                "--deny-list-ssm", "/x/y", "--diff-file", str(path)]
+        run = lambda: subprocess.run(args, env=self.env, capture_output=True, text=True)
+        self.assertEqual(run().returncode, 0)
+        path.write_text("--- a/t\n+++ b/t\n+pat.synthetic@corp.invalid\n")
+        self.assertEqual(run().returncode, 1)
+
     def test_tree_reports_path_and_line_only(self):
         (self.repo / "b.txt").write_text("ok\nkim.synthetic" + "@gmail.com\n")
         self.git("add", ".")
