@@ -962,6 +962,65 @@ class PersonalDataCli(unittest.TestCase):
         self.git("commit", "-qm", "data")
         self.assertEqual(self.commits(f"{base}..HEAD").returncode, 1)
 
+    def branch_behind_a_flagged_main(self):
+        """A pushed branch `b`, and a main on origin that has since gained a
+        commit whose message holds a deny-listed value. Returns b's pushed tip."""
+        remote = Path(self.tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.git("remote", "add", "origin", str(remote))
+        self.git("branch", "-M", "main")
+        self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-qb", "b")
+        (self.repo / "b.txt").write_text("mine\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "mine")
+        self.git("push", "-q", "origin", "b")
+        pushed = self.head()
+        self.git("checkout", "-q", "main")
+        (self.repo / "main.txt").write_text("later\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "owner pat.synthetic@corp.invalid")
+        self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "b")
+        return pushed
+
+    def test_pre_push_skips_main_commits_a_merge_brings_in(self):
+        pushed = self.branch_behind_a_flagged_main()
+        self.git("merge", "-q", "--no-edit", "origin/main")
+        out = self.pre_push(f"refs/heads/b {self.head()} refs/heads/b {pushed}\n")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("1 commits scanned", out.stdout)
+
+    def test_pre_push_still_refuses_the_branch_own_commit_after_a_merge(self):
+        pushed = self.branch_behind_a_flagged_main()
+        self.git("merge", "-q", "--no-edit", "origin/main")
+        (self.repo / "b.txt").write_text("pat.synthetic@corp.invalid\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "mine again")
+        out = self.pre_push(f"refs/heads/b {self.head()} refs/heads/b {pushed}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertNotIn("pat.synthetic", out.stdout + out.stderr)
+
+    def test_pre_push_scans_a_commit_only_another_remote_holds(self):
+        pushed = self.branch_behind_a_flagged_main()
+        other = Path(self.tmp.name) / "other.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+        self.git("remote", "add", "other", str(other))
+        self.git("commit", "-q", "--allow-empty", "-m", "note pat.synthetic@corp.invalid")
+        self.git("push", "-q", "other", "b")
+        out = self.pre_push(f"refs/heads/b {self.head()} refs/heads/b {pushed}\n")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_pre_push_of_a_new_branch_at_origin_main_is_clean(self):
+        self.branch_behind_a_flagged_main()
+        main = subprocess.run(
+            ["git", "rev-parse", "origin/main"], cwd=self.repo, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        out = self.pre_push(f"refs/heads/c {main} refs/heads/c {'0' * 40}\n")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("0 commits scanned", out.stdout)
+
     def test_tree_reports_path_and_line_only(self):
         (self.repo / "b.txt").write_text("ok\nkim.synthetic" + "@gmail.com\n")
         self.git("add", ".")

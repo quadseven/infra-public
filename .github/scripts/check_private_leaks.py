@@ -573,6 +573,11 @@ def pre_push_commits(refs: str) -> list[str]:
 
     A new branch counts from its merge base with origin/HEAD, or all its
     history when there is none. A remote commit this clone lacks exits 2.
+    A commit an origin ref already holds is not scanned: a merge of main into
+    a branch brings main's commits into the range, but the push adds none of
+    them to the remote, and a value in one of them is not this push's to
+    refuse. Only origin's refs count, so a commit another remote holds is
+    still scanned before it reaches this one.
     """
     shas: list[str] = []
     for line in refs.splitlines():
@@ -591,7 +596,8 @@ def pre_push_commits(refs: str) -> list[str]:
                 text=True,
             )
             base = merge_base.stdout.strip() if merge_base.returncode == 0 else ""
-        found = commit_list(f"{base}..{local}" if base else local)
+        spec = f"{base}..{local}" if base else local
+        found = commit_list(spec)
         if not found:
             print(
                 f"FATAL: the ref update to {local} has no commit to scan, so "
@@ -599,7 +605,7 @@ def pre_push_commits(refs: str) -> list[str]:
                 file=sys.stderr,
             )
             raise SystemExit(2)
-        shas += found
+        shas += git_read(["rev-list", spec, "--not", "--remotes=origin"]).split()
     return shas
 
 
