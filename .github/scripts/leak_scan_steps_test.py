@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs the issue-comment step of _reusable.leak-scan.yml under bash.
+"""Runs the PR fetch and issue-comment steps of _reusable.leak-scan.yml under bash.
 
 On an `issues` event the leak scan has no check to fail, so step 9 tells the
 filer through a comment, and each comment is an email. The test lifts that
@@ -204,6 +204,119 @@ class IssueComment(unittest.TestCase):
         self.assertIn("github.event_name == 'issues'", cond)
         self.assertIn("steps.scan.outputs.worst == '0'", cond)
         self.assertIn("steps.scan.outputs.worst == '1'", cond)
+
+
+def git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd, capture_output=True, text=True, timeout=30, check=True,
+    )
+    return done.stdout.strip()
+
+
+FETCH_STEP = "7b."
+
+
+class SquashMergedPrDiff(unittest.TestCase):
+    """An edit to a PR after a squash merge and source-branch deletion
+    (a consumer hit exit 128 here). The squash commit is new, so the old head is
+    reachable only through the retained `refs/pull/<n>/head`; the clone that
+    actions/checkout makes (every branch and tag) does not hold it."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="leak-scan-squash-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def build(self, feature_line: str, keep_pull_ref: bool = True) -> tuple[str, str]:
+        work = self.tmp / "work"
+        work.mkdir()
+        git(work, "init", "-q", "-b", "main")
+        (work / "a.txt").write_text("base\n")
+        git(work, "add", "a.txt")
+        git(work, "commit", "-q", "-m", "base")
+        base = git(work, "rev-parse", "HEAD")
+        git(work, "checkout", "-q", "-b", "feature")
+        (work / "a.txt").write_text("base\n" + feature_line + "\n")
+        git(work, "commit", "-q", "-am", "feature")
+        head = git(work, "rev-parse", "HEAD")
+        git(work, "checkout", "-q", "main")
+        git(work, "merge", "-q", "--squash", "feature")
+        git(work, "commit", "-q", "-m", "squash")
+        origin = self.tmp / "origin.git"
+        git(self.tmp, "clone", "-q", "--bare", str(work), str(origin))
+        if keep_pull_ref:
+            git(origin, "update-ref", "refs/pull/7/head", head)
+        git(origin, "branch", "-D", "feature")
+        git(origin, "reflog", "expire", "--expire=now", "--all")
+        git(origin, "gc", "-q", "--prune=now")
+        # What checkout with fetch-depth 0 leaves: every branch and tag.
+        git(self.tmp, "clone", "-q", "--no-local", str(origin), "_repo")
+        missing = subprocess.run(
+            ["git", "cat-file", "-e", head + "^{commit}"],
+            cwd=self.tmp / "_repo", capture_output=True, check=False,
+        )
+        self.assertNotEqual(missing.returncode, 0, "the clone must not already hold the old head")
+        return base, head
+
+    def run_script(self, prefix: str, **env: str) -> subprocess.CompletedProcess[str]:
+        _, script = step(prefix)
+        return subprocess.run(
+            [shutil.which("bash") or "bash", "-e", "-c", script],
+            cwd=self.tmp,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp), **env},
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+
+    def fetch(self, base: str, head: str) -> subprocess.CompletedProcess[str]:
+        return self.run_script(FETCH_STEP, BASE_SHA=base, HEAD_SHA=head, PR_NUMBER="7", FETCH_TOKEN="")
+
+    def scan(self, base: str, head: str) -> str:
+        out = self.tmp / "out.txt"
+        out.write_text("")
+        done = self.run_script(
+            "8.", MODE="pr", EVENT="pull_request", SCANNER=str(SCANNER), BASE_SHA=base, HEAD_SHA=head,
+            CHANGED_FILES="1", OWN_REPO="owner/public-repo", EXTRA_REFS="", DENY_PARAM="",
+            PR_TITLE="A title", PR_BODY="A body", ISSUE_TITLE="", ISSUE_BODY="",
+            GITHUB_OUTPUT=str(out), RUNNER_TEMP=str(self.tmp),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return dict(line.split("=", 1) for line in out.read_text().splitlines())["worst"]
+
+    def test_the_old_head_is_recovered_through_the_pull_ref_and_scans_clean(self):
+        base, head = self.build("an ordinary line")
+        done = self.fetch(base, head)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.scan(base, head), "0")
+
+    def test_a_denied_line_on_the_recovered_head_still_fails(self):
+        # Built at run time so this file's own diff carries no hostname.
+        base, head = self.build("see " + "srv" + "-box-01")
+        done = self.fetch(base, head)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.scan(base, head), "1")
+
+    def test_an_unrecoverable_head_fails_closed(self):
+        base, head = self.build("an ordinary line", keep_pull_ref=False)
+        done = self.fetch(base, head)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("::error::", done.stdout)
+        self.assertIn(head, done.stdout)
+
+    def test_a_pull_ref_at_another_commit_is_not_taken_for_the_head(self):
+        base, _ = self.build("an ordinary line")
+        done = self.fetch(base, "0" * 40)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("::error::", done.stdout)
+
+    def test_an_unrecoverable_base_fails_closed(self):
+        _, head = self.build("an ordinary line")
+        done = self.fetch("1" * 40, head)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("::error::", done.stdout)
+
+    def test_the_fetch_runs_only_for_pull_requests_in_pr_mode(self):
+        cond, _ = step(FETCH_STEP)
+        self.assertEqual(cond, "github.event_name == 'pull_request' && inputs.mode == 'pr'")
 
 
 if __name__ == "__main__":

@@ -351,6 +351,62 @@ jobs:
           role-to-assume: ${{ secrets.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
 
+      - name: "7b. Fetch the PR's exact base and head commits (PR only)"
+        # The checkout above holds every branch and tag. After a squash merge
+        # and source-branch deletion, the PR's original head is on neither: a
+        # squash is a new commit, so an edit to the merged PR's title or body
+        # would diff a head this clone never received, and git exits 128.
+        # GitHub keeps `refs/pull/<n>/head` after the branch is gone, so the
+        # head comes from there, and must be exactly the event's head SHA.
+        # Either commit still missing fails here, by name. The scan never
+        # falls back to main or to an empty diff.
+        if: github.event_name == 'pull_request' && inputs.mode == 'pr'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Checkout keeps no credentials, and a private caller's fetch needs
+          # one. Passed through git's environment config, never argv.
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd _repo
+          if [ -n "$FETCH_TOKEN" ]; then
+            basic=$(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::$basic"
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0=http.extraheader
+            export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          fi
+          have() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+
+          if ! have "$HEAD_SHA"; then
+            pull_ref="refs/pull/$PR_NUMBER/head"
+            if git fetch --no-tags --quiet origin "+$pull_ref:refs/remotes/pull/$PR_NUMBER/head"; then
+              fetched=$(git rev-parse "refs/remotes/pull/$PR_NUMBER/head")
+              if [ "$fetched" != "$HEAD_SHA" ]; then
+                echo "$pull_ref is at $fetched, not the event's head $HEAD_SHA; asking for the exact commit"
+                git fetch --no-tags --quiet origin "$HEAD_SHA" || true
+              fi
+            else
+              echo "$pull_ref could not be fetched; asking for the exact commit"
+              git fetch --no-tags --quiet origin "$HEAD_SHA" || true
+            fi
+          fi
+          if ! have "$HEAD_SHA"; then
+            echo "::error::the PR head $HEAD_SHA could not be fetched (neither refs/pull/$PR_NUMBER/head nor the exact SHA). Failing closed: no substitute diff is scanned."
+            exit 1
+          fi
+
+          if ! have "$BASE_SHA"; then
+            git fetch --no-tags --quiet origin "$BASE_SHA" || true
+          fi
+          if ! have "$BASE_SHA"; then
+            echo "::error::the PR base $BASE_SHA could not be fetched. Failing closed: no substitute diff is scanned."
+            exit 1
+          fi
+          echo "PR base $BASE_SHA and head $HEAD_SHA are both present"
+
       - name: "8. Scan the diff (PR only) and the title/body (PR or issue), or the full tree"
         id: scan
         env:
