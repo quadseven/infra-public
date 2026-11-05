@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
       # The contract runs `node --test`, so the runtime is a dependency here,
       # not a convenience. Pinned the same way as the guard that owns it.
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24"
       - name: "Fixture suite for the contract validator"
