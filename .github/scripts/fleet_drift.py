@@ -29,6 +29,12 @@ Rules, in the order they decide an entry:
    majority (a two-repo difference is always this), or two values that do
    not order (`ubuntu-latest` vs `ubuntu-24.04`, two bare SHAs). A judgment
    call never suggests a value older than the one the repo has.
+5. A setting line that carries `# fleet-drift: keep <reason>` records a
+   judgment call a person already decided: that occurrence leaves the
+   judgment calls. It is still reported when it falls behind the majority,
+   so the marker cannot hide a stale pin, and its value still counts toward
+   the majority. A repo whose only differences are kept judgment calls gets
+   no issue, so its open issue closes on the next run.
 
 Read-only across the listed repos. Issues go to one tracker (`--issue-repo`),
 titled `Fleet drift: <repo>`, so a run updates its own issue instead of
@@ -56,7 +62,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -86,6 +92,7 @@ TOOL_RE = re.compile(
 TOOL_DOWNLOAD_RE = re.compile(
     r"\b(?:[\w.-]+)/(actionlint|shellcheck)/releases/download/v?(\d+(?:\.\d+)+)\b"
 )
+KEEP_RE = re.compile(r"#\s*fleet-drift:\s*keep\b\s*(.*)$")
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,7 @@ class Occurrence:
     line: int
     text: str
     ref: str = ""  # the `@ref` of an action pin, so a change can name the SHA
+    keep: str = ""  # the reason from a `# fleet-drift: keep` marker on the line
 
 
 @dataclass(frozen=True)
@@ -213,14 +221,17 @@ def extract(repo: str, path: str, text: str) -> list[Occurrence]:
             continue
         if current_action and len(line) - len(stripped) <= action_indent:
             current_action = ""
+        keep = KEEP_RE.search(line)
+        reason = (keep.group(1).strip() or "kept") if keep else ""
         m = USES_RE.match(line)
         if not m:
-            out.extend(_plain_settings(repo, path, n, line, stripped, current_action))
+            found = _plain_settings(repo, path, n, line, stripped, current_action)
+            out.extend(replace(o, keep=reason) for o in found)
             continue
         occ = _action_occurrence(repo, path, n, m, stripped)
         if occ is None:
             continue
-        out.append(occ)
+        out.append(replace(occ, keep=reason))
         current_action = occ.key.split(":", 1)[1]
         # A step's keys sit right of its dash (`- uses:`), or level with a
         # bare `uses:`; a line at or left of this column ends the step.
@@ -393,7 +404,7 @@ def analyse(
                 got = _without_majority(s, o, best, values)
             if got == AHEAD:
                 ahead.append((s, o))
-            elif isinstance(got, Entry):
+            elif isinstance(got, Entry) and not (got.kind == "judgment" and o.keep):
                 entries.setdefault(o.repo, []).append(got)
     for items in entries.values():
         items.sort(key=lambda e: (e.occ.path, e.occ.line, e.occ.key))
@@ -472,7 +483,8 @@ def render_issue(repo: str, items: list[Entry]) -> str:
             "## Judgment calls",
             "",
             "No clear majority or no order between the values, so these are "
-            "for a person to decide, not defects.",
+            "for a person to decide, not defects. To keep a value, end its line "
+            "with `# fleet-drift: keep <reason>`.",
             "",
         ]
         out += [

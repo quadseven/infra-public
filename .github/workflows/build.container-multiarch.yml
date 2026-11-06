@@ -168,7 +168,7 @@ jobs:
   merge:
     needs: build
     if: ${{ inputs.push }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04  # fleet-drift: keep pinned image, decided in #195
     # Empty string = no environment (subject is the branch ref). Set by callers
     # whose ECR role trust is scoped to an environment subject (e.g. aws-prod).
     environment: ${{ inputs.environment }}

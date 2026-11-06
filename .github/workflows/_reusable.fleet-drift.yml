@@ -8,7 +8,10 @@ name: _reusable - fleet drift report
 # file:line and the exact change. A repo whose pin is newer than the majority
 # is never asked to downgrade, and a difference with no majority (two repos
 # that disagree, or values that do not order) is filed as a judgment call,
-# not a defect. The rules live in .github/scripts/fleet_drift.py.
+# not a defect. A judgment call a person has decided is settled in the
+# checked repo: `# fleet-drift: keep <reason>` at the end of the setting line
+# drops it from the issue, so the issue can close. The marker never hides a
+# value behind the majority. The rules live in .github/scripts/fleet_drift.py.
 #
 # Flow: fetch the script from infra-public at `script-ref` -> read each repo's
 # files through the REST API (read-only) -> write the report to the job
