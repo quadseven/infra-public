@@ -136,6 +136,21 @@ name: _reusable · Leak scan (PR diff + PR/issue text, or full tree)
 #         use-shared-deny-list: true   # or deny-list-ssm-param: <parameter path>
 #       secrets:
 #         aws-role-arn: ${{ secrets.LEAK_SCAN_ROLE_ARN }}
+#
+# Example PRIVATE-repo caller (infra-public#184). `personal-data: true` runs
+# only the personal rules (mail and street shapes, household deny-list terms),
+# so the repo's own hosts and names are not flagged. It needs a deny-list:
+# without one the household layer is absent, so the check fails closed (5b).
+#   jobs:
+#     leak-scan:
+#       uses: quadseven/infra-public/.github/workflows/_reusable.leak-scan.yml@<sha>
+#       permissions: { contents: read, id-token: write }
+#       with:
+#         personal-data: true
+#         use-shared-deny-list: true
+#         runner: <your private runner label>
+#       secrets:
+#         aws-role-arn: ${{ secrets.LEAK_SCAN_ROLE_ARN }}
 
 on:
   workflow_call:
@@ -157,6 +172,11 @@ on:
         default: ""
       use-shared-deny-list:
         description: "true = read the fleet's shared deny-list parameter, whose path lives in this workflow (SHARED_DENY_LIST_PARAM), so the caller names no path. Same requirements and fail-closed behavior as deny-list-ssm-param. Mutually exclusive with deny-list-ssm-param."
+        required: false
+        type: boolean
+        default: false
+      personal-data:
+        description: "true = scan for personal data only (mail and street shapes, household deny-list terms), for a private repo whose own hosts and names are legal. Passed to every scan, full-tree included. Requires use-shared-deny-list or deny-list-ssm-param, or the check fails."
         required: false
         type: boolean
         default: false
@@ -311,6 +331,7 @@ jobs:
         env:
           EXPLICIT_PARAM: ${{ inputs.deny-list-ssm-param }}
           USE_SHARED: ${{ inputs.use-shared-deny-list }}
+          PERSONAL_DATA: ${{ inputs.personal-data }}
           # The one place the shared parameter's path is written down. Callers
           # opt in with `use-shared-deny-list: true` instead of repeating it.
           SHARED_DENY_LIST_PARAM: /infra/leak-scan/deny-list
@@ -328,6 +349,12 @@ jobs:
             echo "deny-list: the caller's parameter"
           else
             echo "deny-list: none (generic shapes only)"
+          fi
+          # Household values live only in the deny-list, so a personal-data
+          # scan without one would drop its main layer and still go green.
+          if [ "$PERSONAL_DATA" = "true" ] && [ -z "$param" ]; then
+            echo "::error::personal-data is true but no deny-list is set. Pass use-shared-deny-list or deny-list-ssm-param: without one the household layer is absent, so this fails instead."
+            exit 1
           fi
           echo "param=$param" >> "$GITHUB_OUTPUT"
 
@@ -419,6 +446,7 @@ jobs:
           OWN_REPO: ${{ github.repository }}
           EXTRA_REFS: ${{ inputs.allowed-repo-refs }}
           DENY_PARAM: ${{ steps.deny.outputs.param }}
+          PERSONAL_DATA: ${{ inputs.personal-data }}
           # Attacker-controlled text, for whichever event fired - exactly one
           # of the two pairs below is populated by GitHub. Written to a file
           # below and never interpolated into a command.
@@ -441,6 +469,11 @@ jobs:
           done < <(printf '%s\n' "$EXTRA_REFS" | tr ',' '\n')
           if [ -n "$DENY_PARAM" ]; then
             args+=(--deny-list-ssm "$DENY_PARAM")
+          fi
+          # Every scan below takes args, so the diff, the title/body and the
+          # full tree all run the personal rules alone.
+          if [ "$PERSONAL_DATA" = "true" ]; then
+            args+=(--personal-data)
           fi
 
           if [ "$MODE" = "full-tree" ]; then
