@@ -275,7 +275,7 @@ class SquashMergedPrDiff(unittest.TestCase):
         out.write_text("")
         done = self.run_script(
             "8.", MODE="pr", EVENT="pull_request", SCANNER=str(SCANNER), BASE_SHA=base, HEAD_SHA=head,
-            CHANGED_FILES="1", OWN_REPO="owner/public-repo", EXTRA_REFS="", DENY_PARAM="",
+            CHANGED_FILES="1", OWN_REPO="owner/public-repo", EXTRA_REFS="", DENY_PARAM="", PERSONAL_DATA="false",
             PR_TITLE="A title", PR_BODY="A body", ISSUE_TITLE="", ISSUE_BODY="",
             GITHUB_OUTPUT=str(out), RUNNER_TEMP=str(self.tmp),
         )
@@ -317,6 +317,105 @@ class SquashMergedPrDiff(unittest.TestCase):
     def test_the_fetch_runs_only_for_pull_requests_in_pr_mode(self):
         cond, _ = step(FETCH_STEP)
         self.assertEqual(cond, "github.event_name == 'pull_request' && inputs.mode == 'pr'")
+
+
+FAKE_SCANNER = r"""import json, os, sys
+with open(os.environ["SCANNER_LOG"], "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\n")
+"""
+
+
+class PersonalDataInput(unittest.TestCase):
+    """The `personal-data` input (infra-public#184): a private repo runs only
+    the personal rules, so its own hosts are not flagged, and the run must
+    carry a deny-list because the household layer is the point of the scan."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="leak-scan-personal-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        (self.tmp / "_repo").mkdir()
+        self.scanner = self.tmp / "fake_scanner.py"
+        self.scanner.write_text(FAKE_SCANNER)
+        self.log = self.tmp / "scanner.log"
+        self.log.write_text("")
+
+    def run_script(self, prefix: str, **env: str) -> subprocess.CompletedProcess[str]:
+        _, script = step(prefix)
+        return subprocess.run(
+            [shutil.which("bash") or "bash", "-e", "-c", script],
+            cwd=self.tmp,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp), **env},
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+
+    def scan_calls(self, mode: str, event: str, personal: str) -> list[list[str]]:
+        out = self.tmp / "out.txt"
+        out.write_text("")
+        done = self.run_script(
+            "8.", MODE=mode, EVENT=event, SCANNER=str(self.scanner), SCANNER_LOG=str(self.log),
+            BASE_SHA="a" * 40, HEAD_SHA="b" * 40, CHANGED_FILES="1", OWN_REPO="owner/private-repo",
+            EXTRA_REFS="", DENY_PARAM="/some/param", PERSONAL_DATA=personal,
+            PR_TITLE="A title", PR_BODY="A body", ISSUE_TITLE="", ISSUE_BODY="",
+            GITHUB_OUTPUT=str(out), RUNNER_TEMP=str(self.tmp),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def resolve(self, **env: str) -> subprocess.CompletedProcess[str]:
+        out = self.tmp / "deny-out.txt"
+        out.write_text("")
+        base = {"EXPLICIT_PARAM": "", "USE_SHARED": "false", "PERSONAL_DATA": "false",
+                "SHARED_DENY_LIST_PARAM": "/shared/param", "GITHUB_OUTPUT": str(out)}
+        return self.run_script("5b.", **{**base, **env})
+
+    def test_the_flag_reaches_the_diff_and_the_text_scans_when_true(self):
+        calls = self.scan_calls("pr", "pull_request", "true")
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("--diff", calls[0])
+        self.assertIn("--text-file", calls[1])
+        for call in calls:
+            self.assertIn("--personal-data", call)
+            self.assertIn("--deny-list-ssm", call)
+
+    def test_the_flag_reaches_an_issue_text_scan_when_true(self):
+        calls = self.scan_calls("pr", "issues", "true")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--personal-data", calls[0])
+
+    def test_the_flag_reaches_the_full_tree_scan_when_true(self):
+        calls = self.scan_calls("full-tree", "schedule", "true")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--tree", calls[0])
+        self.assertIn("--personal-data", calls[0])
+
+    def test_the_flag_is_absent_when_false(self):
+        for mode, event in (("pr", "pull_request"), ("full-tree", "schedule")):
+            self.log.write_text("")
+            calls = self.scan_calls(mode, event, "false")
+            self.assertTrue(calls)
+            for call in calls:
+                self.assertNotIn("--personal-data", call)
+
+    def test_personal_data_without_a_deny_list_fails_closed_by_name(self):
+        done = self.resolve(PERSONAL_DATA="true")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("::error::", done.stdout)
+        self.assertIn("personal-data", done.stdout)
+
+    def test_personal_data_with_either_deny_list_passes(self):
+        self.assertEqual(self.resolve(PERSONAL_DATA="true", USE_SHARED="true").returncode, 0)
+        self.assertEqual(self.resolve(PERSONAL_DATA="true", EXPLICIT_PARAM="/p").returncode, 0)
+
+    def test_no_personal_data_and_no_deny_list_still_passes(self):
+        self.assertEqual(self.resolve().returncode, 0)
+
+    def test_the_input_is_a_boolean_that_defaults_to_false(self):
+        text = WORKFLOW.read_text()
+        m = re.search(r"\n      personal-data:\n((?:        .*\n)+)", text)
+        self.assertIsNotNone(m, "no personal-data input")
+        self.assertIn("type: boolean", m.group(1))
+        self.assertIn("default: false", m.group(1))
+        self.assertIn("PERSONAL_DATA: ${{ inputs.personal-data }}", text)
 
 
 if __name__ == "__main__":
