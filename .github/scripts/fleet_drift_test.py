@@ -200,6 +200,74 @@ class JudgmentCalls(unittest.TestCase):
         self.assertEqual([e.kind for e in runner], ["judgment"])
 
 
+def write_fleet(root: Path, texts: dict[str, str]) -> None:
+    """One `.github/workflows/ci.yml` per repo under root, as fetch lays them out."""
+    for repo, text in texts.items():
+        wf = root / repo.replace("/", "__", 1) / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "ci.yml").write_text(text, encoding="utf-8")
+
+
+class KeepMarker(unittest.TestCase):
+    """`# fleet-drift: keep <reason>` settles a judgment call, never a defect."""
+
+    RUNNER = "jobs:\n  a:\n    runs-on: {}\n"
+
+    def test_marker_is_read_with_its_reason(self):
+        text = self.RUNNER.format("ubuntu-24.04  # fleet-drift: keep pinned on purpose")
+        (occ,) = extract("r/x", "w.yml", text)
+        self.assertEqual((occ.value, occ.keep), ("ubuntu-24.04", "pinned on purpose"))
+        (plain,) = extract("r/x", "w.yml", self.RUNNER.format("ubuntu-24.04"))
+        self.assertEqual(plain.keep, "")
+
+    def test_marked_judgment_call_is_dropped(self):
+        texts = {
+            "x/a": self.RUNNER.format("ubuntu-latest"),
+            "x/b": self.RUNNER.format("ubuntu-latest"),
+            "x/c": self.RUNNER.format("ubuntu-24.04  # fleet-drift: keep decided"),
+        }
+        occs = [o for r, t in texts.items() for o in extract(r, "w.yml", t)]
+        entries, _ = analyse(settings(occs))
+        self.assertEqual(entries, {})
+
+    def test_marked_defect_is_still_reported(self):
+        texts = {
+            "x/a": "      - run: uvx ruff@0.15.10 check .\n",
+            "x/b": "      - run: uvx ruff@0.15.10 check .\n",
+            "x/c": "      - run: uvx ruff@0.14.0 check .  # fleet-drift: keep old\n",
+        }
+        occs = [o for r, t in texts.items() for o in extract(r, "w.yml", t)]
+        entries, _ = analyse(settings(occs))
+        self.assertEqual(
+            [(e.kind, e.target) for e in entries["x/c"]], [("defect", "0.15.10")]
+        )
+
+    def test_marked_value_still_counts_toward_the_majority(self):
+        texts = {
+            "x/a": self.RUNNER.format("ubuntu-22.04  # fleet-drift: keep a"),
+            "x/b": self.RUNNER.format("ubuntu-22.04  # fleet-drift: keep b"),
+            "x/c": self.RUNNER.format("ubuntu-24.04"),
+        }
+        occs = [o for r, t in texts.items() for o in extract(r, "w.yml", t)]
+        (s,) = settings(occs)
+        self.assertEqual(s.majority, "ubuntu-22.04")
+
+    def test_repo_with_only_marked_judgments_is_clean_and_its_issue_closes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fleet(
+                root,
+                {
+                    "x/a": self.RUNNER.format("ubuntu-latest"),
+                    "x/b": self.RUNNER.format("ubuntu-latest"),
+                    "x/c": self.RUNNER.format("ubuntu-24.04  # fleet-drift: keep x"),
+                },
+            )
+            plan, _ = build_plan(root)
+        self.assertEqual(plan["issues"], [])
+        self.assertIn("x/c", plan["clean"])
+
+
 class FakeResponse(io.BytesIO):
     def __enter__(self):
         return self
