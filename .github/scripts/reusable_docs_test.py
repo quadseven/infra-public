@@ -128,6 +128,17 @@ class Ascii(unittest.TestCase):
             to_ascii("caf\u00e9", "x")
 
 
+class PublicAgentPolicy(unittest.TestCase):
+    def test_installation_token_access_guidance_uses_scope_and_observed_denial(self):
+        policy = (Path(__file__).resolve().parents[2] / "templates/public-repo/AGENTS.md").read_text()
+        self.assertIn("installation's repository scope", policy)
+        self.assertIn("Do not infer the token's\ncapabilities from repository `permissions` booleans", policy)
+        self.assertIn("exact authorized command", policy)
+        self.assertIn("denial response", policy)
+        self.assertIn("dedicated App identity", policy)
+        self.assertIn("Keep credentials out of arguments, output, logs", policy)
+
+
 class Coverage(unittest.TestCase):
     def test_reachable_follows_local_and_slug_pinned_calls(self):
         calls = {"canary.yml": ["outer.yml"], "outer.yml": ["example.yml"]}
