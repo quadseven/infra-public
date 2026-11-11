@@ -136,17 +136,22 @@ class S3Getter(Protocol):
     def __call__(self, pointer: dict) -> bytes: ...
 
 
+# AI-REVIEW 2026-11-11 [codex/in-process/standards] 200-STANDARDS-001:
+# Outcome docs distinguish transformed values from retryable processing errors.
 @dataclass(frozen=True, slots=True)
 class CaveOutcome:
     """The honest outcome of one `fetch_result_for` attempt.
 
     `pending` -- no matching result on the queue yet (the caller re-polls).
     `ready`   -- a result arrived and was successfully parsed; `parsed` is
-                 whatever the injected `parse` callback returned.
-    `failed`  -- the connector reported `ok=false`, OR the payload could not
-                 be parsed/transformed into something usable; honest
-                 failure, NEVER a fabricated `parsed` value (`parsed` stays
-                 `None`).
+                 the optional transform's return, or the parsed value when
+                 no transform is supplied.
+    `failed`  -- the connector reported `ok=false`, validation failed, or
+                 parsing/transforming returned an empty value. No fabricated
+                 `parsed` value is returned (`parsed` stays `None`).
+
+    Transform exceptions and cancellation propagate without an outcome or
+    message deletion, allowing the caller to retry.
 
     `detail` carries a short, bounded, whitelisted-charset failure kind when
     the connector said `ok=false` AND supplied one (e.g. a machine-readable
@@ -326,6 +331,7 @@ async def fetch_result_for(
     *,
     request_id: str,
     parse: Callable[[dict], Awaitable[object] | object],
+    transform: Callable[[object], Awaitable[object] | object] | None = None,
 ) -> CaveOutcome:
     """Drain the results FIFO looking for `request_id`; return the honest
     outcome. Scans up to `MAX_RECEIVE_BATCHES` batches per call so a deep
@@ -344,6 +350,13 @@ async def fetch_result_for(
     object; it may be async to run further async work (e.g. re-scoring
     against the caller's current state). Any exception it raises, OR an
     empty/falsy return, maps to `failed` with no `detail` (see DECISION 4).
+    `transform`, when supplied, receives a nonempty parsed value and may be
+    sync or async. It runs outside the validation catch, before deletion.
+    Processing exceptions and cancellation propagate without consuming the
+    message, allowing redelivery after its visibility timeout. Transforms
+    must therefore be safe to run again. Its return replaces `parsed`; an
+    empty/falsy transformed value resolves to `failed` and is consumed.
+
     A matched message is deleted once resolved -- on `ready` AND on
     `failed` alike, since redelivery of an already-resolved match is
     idempotent (a redelivered `ready` result re-parses to the same domain
@@ -383,7 +396,7 @@ async def fetch_result_for(
                 # this old. See DECISION 2 in the module docstring.
                 await _purge_if_abandoned(channel, msg, request_id)
                 continue
-            return await _resolve_matched(channel, result_obj, msg, parse)
+            return await _resolve_matched(channel, result_obj, msg, parse, transform)
 
     # Scanned the batch budget without finding our request -> still pending.
     return CaveOutcome(status="pending")
@@ -424,6 +437,7 @@ async def _resolve_matched(
     result_obj: FallbackResult,
     msg: dict,
     parse: Callable[[dict], Awaitable[object] | object],
+    transform: Callable[[object], Awaitable[object] | object] | None = None,
 ) -> CaveOutcome:
     """Turn the matched `FallbackResult` into the final outcome, deleting the
     message once resolved (so it doesn't redeliver forever)."""
@@ -485,6 +499,14 @@ async def _resolve_matched(
         )
         await _delete()
         return CaveOutcome(status="failed")
+
+    # AI-REVIEW 2026-11-11 [codex/in-process/spec] 200-SPEC-001:
+    # Preserve the legacy truthiness check after deletion when no transform exists.
+    if transform is not None and parsed:
+        # Processing failures are retryable: do not acknowledge until it succeeds.
+        parsed = transform(parsed)
+        if inspect.isawaitable(parsed):
+            parsed = await parsed
 
     await _delete()
     if not parsed:

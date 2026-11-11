@@ -16,6 +16,7 @@ primitives, proving a new persona needs no new plumbing on either side.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -607,3 +608,176 @@ async def test_throwaway_persona_enqueue_then_drain_round_trip_via_shared_module
 
     assert outcome == CaveOutcome(status="ready", parsed="slept 8h, quality=good")
     assert results_sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+async def test_transform_runs_after_parse_before_delete_and_returns_its_value():
+    events = []
+
+    class RecordingSQS(_FakeSQSReceiver):
+        def delete_message(self, **kwargs):
+            events.append("delete")
+            super().delete_message(**kwargs)
+
+    sqs = RecordingSQS()
+    sqs.add(_result("transform", result={"score": 3}))
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+
+    def parse(payload):
+        events.append("parse")
+        return {"validated": payload["score"]}
+
+    def transform(parsed):
+        assert parsed == {"validated": 3}
+        events.append("transform")
+        return {"ranked": 6}
+
+    outcome = await fetch_result_for(channel, request_id="transform", parse=parse, transform=transform)
+    assert outcome.status == "ready"
+    assert outcome.parsed == {"ranked": 6}
+    assert events == ["parse", "transform", "delete"]
+    assert sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_transform_error_propagates_without_consuming_valid_result(asynchronous):
+    sqs = _FakeSQSReceiver()
+    body = _result("retry", result={"score": 3})
+    sqs.add(body)
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    error = OSError("temporary processing failure")
+
+    def fail(parsed):
+        raise error
+
+    async def fail_async(parsed):
+        await asyncio.sleep(0)
+        raise error
+
+    with pytest.raises(OSError) as caught:
+        await fetch_result_for(
+            channel, request_id="retry", parse=_echo_parse, transform=fail_async if asynchronous else fail
+        )
+    assert caught.value is error
+    assert sqs.remaining_bodies == [body]
+
+
+@pytest.mark.asyncio
+async def test_transform_cancellation_leaves_valid_result_for_redelivery():
+    sqs = _FakeSQSReceiver()
+    body = _result("cancel", result={"score": 3})
+    sqs.add(body)
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    started = asyncio.Event()
+
+    async def transform(parsed):
+        started.set()
+        await asyncio.Future()
+
+    task = asyncio.create_task(
+        fetch_result_for(channel, request_id="cancel", parse=_echo_parse, transform=transform)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sqs.remaining_bodies == [body]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_async_transform_finishes_before_result_is_consumed():
+    sqs = _FakeSQSReceiver()
+    body = _result("async", result={"score": 3})
+    sqs.add(body)
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+
+    async def transform(parsed):
+        await asyncio.sleep(0)
+        assert sqs.remaining_bodies == [body]
+        return {"ranked": parsed["score"] * 2}
+
+    outcome = await fetch_result_for(channel, request_id="async", parse=_echo_parse, transform=transform)
+    assert outcome.status == "ready"
+    assert outcome.parsed == {"ranked": 6}
+    assert sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["pending", "connector_failure", "parse_error", "empty_parse"])
+async def test_transform_is_skipped_without_a_valid_nonempty_result(kind):
+    sqs = _FakeSQSReceiver()
+    if kind != "pending":
+        sqs.add(_result("skip", ok=kind != "connector_failure", result={"score": 3}))
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    calls = []
+
+    def parse(payload):
+        if kind == "parse_error":
+            raise ValueError("invalid domain payload")
+        return [] if kind == "empty_parse" else payload
+
+    def transform(parsed):
+        calls.append(parsed)
+        return {"unexpected": True}
+
+    outcome = await fetch_result_for(channel, request_id="skip", parse=parse, transform=transform)
+    assert outcome.status == ("pending" if kind == "pending" else "failed")
+    assert calls == []
+    assert sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+async def test_empty_transform_result_is_failed_without_falling_back_to_parsed_value():
+    sqs = _FakeSQSReceiver()
+    sqs.add(_result("empty", result={"score": 3}))
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    outcome = await fetch_result_for(
+        channel, request_id="empty", parse=_echo_parse, transform=lambda parsed: []
+    )
+    assert outcome.status == "failed"
+    assert outcome.parsed is None
+    assert sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+async def test_omitted_transform_preserves_delete_before_single_truthiness_check():
+    events = []
+
+    class DomainValue:
+        def __bool__(self):
+            events.append("truthiness")
+            return True
+
+    class RecordingSQS(_FakeSQSReceiver):
+        def delete_message(self, **kwargs):
+            events.append("delete")
+            super().delete_message(**kwargs)
+
+    sqs = RecordingSQS()
+    sqs.add(_result("unchanged", result={"score": 3}))
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    value = DomainValue()
+    outcome = await fetch_result_for(channel, request_id="unchanged", parse=lambda payload: value)
+    assert outcome.status == "ready"
+    assert outcome.parsed is value
+    assert events == ["delete", "truthiness"]

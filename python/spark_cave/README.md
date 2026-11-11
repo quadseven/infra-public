@@ -31,6 +31,20 @@ discipline as the reusable workflows here).
 Pure stdlib, zero runtime deps. Queue/bucket names are caller-injected — this
 library hardcodes none.
 
+## Result processing and retries
+
+`fetch_result_for(channel, request_id=..., parse=..., transform=...)` accepts
+an optional synchronous or asynchronous `transform` callback. `parse` validates
+and converts the payload; an exception or empty return still resolves to
+`failed` and consumes the matched message. Existing callers need no change.
+
+For a nonempty parsed value, `transform` runs after validation and before the
+message is deleted. Its return becomes `CaveOutcome.parsed`. An empty transformed
+value resolves to `failed` and is consumed. A processing exception or cancellation
+propagates without deleting the message. The queue can deliver that message again
+after its visibility timeout, so transforms must be safe to run twice. A transform
+is never called for pending results, connector failures or invalid parsed values.
+
 ## Test
 
     cd python/spark_cave && uv run pytest
