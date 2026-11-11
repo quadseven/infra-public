@@ -119,6 +119,20 @@ beyond the README and an example config file to know what to change.
   exists — they're already written to take config as input rather than
   assume it.
 
+## Installation-token access checks
+
+For an installation token, use the installation's repository scope to
+establish whether a repository is included. Do not infer the token's
+capabilities from repository `permissions` booleans; those values are not
+an access verdict for an installation token.
+
+Report that a write is blocked only after the exact authorized command
+returns a denial response. State the command and the denial response as
+evidence. Do not probe access by creating credentials, changing grants, or
+falling back to a personal identity. Use only the dedicated App identity.
+Keep credentials out of arguments, output, logs, repository files, and chat;
+load secrets only into the environment of the process that needs them.
+
 ## Why this file, not just a smarter secret scanner
 
 A pattern-matching scanner catches shapes: an AWS key, a PEM block, a
