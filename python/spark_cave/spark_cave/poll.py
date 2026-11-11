@@ -326,6 +326,7 @@ async def fetch_result_for(
     *,
     request_id: str,
     parse: Callable[[dict], Awaitable[object] | object],
+    transform: Callable[[object], Awaitable[object] | object] | None = None,
 ) -> CaveOutcome:
     """Drain the results FIFO looking for `request_id`; return the honest
     outcome. Scans up to `MAX_RECEIVE_BATCHES` batches per call so a deep
@@ -344,6 +345,13 @@ async def fetch_result_for(
     object; it may be async to run further async work (e.g. re-scoring
     against the caller's current state). Any exception it raises, OR an
     empty/falsy return, maps to `failed` with no `detail` (see DECISION 4).
+    `transform`, when supplied, receives a nonempty parsed value and may be
+    sync or async. It runs outside the validation catch, before deletion.
+    Processing exceptions and cancellation propagate without consuming the
+    message, allowing redelivery after its visibility timeout. Transforms
+    must therefore be safe to run again. Its return replaces `parsed`; an
+    empty/falsy transformed value resolves to `failed` and is consumed.
+
     A matched message is deleted once resolved -- on `ready` AND on
     `failed` alike, since redelivery of an already-resolved match is
     idempotent (a redelivered `ready` result re-parses to the same domain
@@ -383,7 +391,7 @@ async def fetch_result_for(
                 # this old. See DECISION 2 in the module docstring.
                 await _purge_if_abandoned(channel, msg, request_id)
                 continue
-            return await _resolve_matched(channel, result_obj, msg, parse)
+            return await _resolve_matched(channel, result_obj, msg, parse, transform)
 
     # Scanned the batch budget without finding our request -> still pending.
     return CaveOutcome(status="pending")
@@ -424,6 +432,7 @@ async def _resolve_matched(
     result_obj: FallbackResult,
     msg: dict,
     parse: Callable[[dict], Awaitable[object] | object],
+    transform: Callable[[object], Awaitable[object] | object] | None = None,
 ) -> CaveOutcome:
     """Turn the matched `FallbackResult` into the final outcome, deleting the
     message once resolved (so it doesn't redeliver forever)."""
@@ -485,6 +494,12 @@ async def _resolve_matched(
         )
         await _delete()
         return CaveOutcome(status="failed")
+
+    if parsed and transform is not None:
+        # Processing failures are retryable: do not acknowledge until it succeeds.
+        parsed = transform(parsed)
+        if inspect.isawaitable(parsed):
+            parsed = await parsed
 
     await _delete()
     if not parsed:
