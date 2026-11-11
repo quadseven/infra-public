@@ -755,3 +755,29 @@ async def test_empty_transform_result_is_failed_without_falling_back_to_parsed_v
     assert outcome.status == "failed"
     assert outcome.parsed is None
     assert sqs.remaining_bodies == []
+
+
+@pytest.mark.asyncio
+async def test_omitted_transform_preserves_delete_before_single_truthiness_check():
+    events = []
+
+    class DomainValue:
+        def __bool__(self):
+            events.append("truthiness")
+            return True
+
+    class RecordingSQS(_FakeSQSReceiver):
+        def delete_message(self, **kwargs):
+            events.append("delete")
+            super().delete_message(**kwargs)
+
+    sqs = RecordingSQS()
+    sqs.add(_result("unchanged", result={"score": 3}))
+    channel = CaveResultChannel(
+        sqs=sqs, results_queue_url="https://example.com/results.fifo", persona="throwaway"
+    )
+    value = DomainValue()
+    outcome = await fetch_result_for(channel, request_id="unchanged", parse=lambda payload: value)
+    assert outcome.status == "ready"
+    assert outcome.parsed is value
+    assert events == ["delete", "truthiness"]

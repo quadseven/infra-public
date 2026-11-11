@@ -136,17 +136,22 @@ class S3Getter(Protocol):
     def __call__(self, pointer: dict) -> bytes: ...
 
 
+# AI-REVIEW 2026-11-11 [codex/in-process/standards] 200-STANDARDS-001:
+# Outcome docs distinguish transformed values from retryable processing errors.
 @dataclass(frozen=True, slots=True)
 class CaveOutcome:
     """The honest outcome of one `fetch_result_for` attempt.
 
     `pending` -- no matching result on the queue yet (the caller re-polls).
     `ready`   -- a result arrived and was successfully parsed; `parsed` is
-                 whatever the injected `parse` callback returned.
-    `failed`  -- the connector reported `ok=false`, OR the payload could not
-                 be parsed/transformed into something usable; honest
-                 failure, NEVER a fabricated `parsed` value (`parsed` stays
-                 `None`).
+                 the optional transform's return, or the parsed value when
+                 no transform is supplied.
+    `failed`  -- the connector reported `ok=false`, validation failed, or
+                 parsing/transforming returned an empty value. No fabricated
+                 `parsed` value is returned (`parsed` stays `None`).
+
+    Transform exceptions and cancellation propagate without an outcome or
+    message deletion, allowing the caller to retry.
 
     `detail` carries a short, bounded, whitelisted-charset failure kind when
     the connector said `ok=false` AND supplied one (e.g. a machine-readable
@@ -495,7 +500,9 @@ async def _resolve_matched(
         await _delete()
         return CaveOutcome(status="failed")
 
-    if parsed and transform is not None:
+    # AI-REVIEW 2026-11-11 [codex/in-process/spec] 200-SPEC-001:
+    # Preserve the legacy truthiness check after deletion when no transform exists.
+    if transform is not None and parsed:
         # Processing failures are retryable: do not acknowledge until it succeeds.
         parsed = transform(parsed)
         if inspect.isawaitable(parsed):
