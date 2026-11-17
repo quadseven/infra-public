@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fleet_drift import (  # noqa: E402
+    PINS_FILE,
     GitHub,
     analyse,
     build_plan,
@@ -35,6 +36,7 @@ from fleet_drift import (  # noqa: E402
     fetch,
     file_issues,
     main,
+    read_pins,
     repo_files,
     runner_compare,
     scan,
@@ -498,6 +500,208 @@ class OwnPins(unittest.TestCase):
                 if occ.ref != CHECKOUT_V6 and compare(occ.value, "v6.0.2") != 1:
                     behind.append(f"{rel}:{occ.line} {occ.value}")
         self.assertEqual(behind, [])
+
+
+# infra-public#204: three repos check the canonical hygiene linter out at
+# three different SHAs through `with: ref:`, and the report could not see it.
+LINTER_REPO = "quadseven/infra-public"
+SHA_NEW = "a1" * 20
+SHA_MID = "b2" * 20
+SHA_OLD = "c3" * 20
+SHA_HEAD = "d4" * 20
+
+
+def hygiene_workflow(ref: str, keep: str = "") -> str:
+    return (
+        "jobs:\n"
+        "  hygiene:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        f"      - uses: actions/checkout@{CHECKOUT_V6} # v6.0.2\n"
+        "        with:\n"
+        f"          repository: {LINTER_REPO}\n"
+        f"          ref: {ref}{keep}\n"
+        "          path: _hygiene\n"
+        "      - run: python3 _hygiene/.github/scripts/workflow_hygiene.py\n"
+    )
+
+
+def fleet_of(root: Path, refs: dict[str, str]) -> None:
+    for repo, ref in refs.items():
+        wf = root / repo.replace("/", "__") / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "check.workflow-hygiene.yml").write_text(hygiene_workflow(ref))
+
+
+THREE_PINS = {"o/grug": SHA_NEW, "o/macchina": SHA_OLD, "o/ledger": SHA_MID}
+
+
+class CrossRepoRefPins(unittest.TestCase):
+    def test_ref_of_a_cross_repo_checkout_is_read_as_a_pin(self):
+        got = [
+            (o.key, o.value, o.line)
+            for o in extract("r/x", "w.yml", hygiene_workflow(SHA_OLD))
+        ]
+        self.assertIn((f"pin:{LINTER_REPO}", SHA_OLD, 8), got)
+
+    def test_repository_after_ref_is_still_read(self):
+        text = hygiene_workflow(SHA_OLD).replace(
+            f"          repository: {LINTER_REPO}\n          ref: {SHA_OLD}\n",
+            f"          ref: {SHA_OLD}\n          repository: {LINTER_REPO}\n",
+        )
+        got = [(o.key, o.value, o.line) for o in extract("r/x", "w.yml", text)]
+        self.assertIn((f"pin:{LINTER_REPO}", SHA_OLD, 7), got)
+
+    def test_own_repo_ref_and_expressions_are_not_pins(self):
+        text = (
+            "jobs:\n"
+            "  a:\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v6\n"
+            "        with:\n"
+            "          ref: ${{ github.head_ref }}\n"
+            "      - uses: actions/checkout@v6\n"
+            "        with:\n"
+            "          repository: o/other\n"
+            "          ref: ${{ inputs.sha }}\n"
+            "      - uses: actions/checkout@v6\n"
+            "        with:\n"
+            f"          ref: {SHA_OLD}\n"
+            "      - name: next step\n"
+            "        with:\n"
+            "          repository: o/other\n"
+        )
+        got = [o.key for o in extract("r/x", "w.yml", text)]
+        self.assertFalse([k for k in got if k.startswith("pin:")], got)
+
+    def test_without_head_data_every_differing_pin_is_named(self):
+        # Three bare SHAs do not order, so with no head read each repo still
+        # gets a judgment call naming its pin; before #204 none was reported.
+        with tempfile.TemporaryDirectory() as tmp:
+            fleet_of(Path(tmp), THREE_PINS)
+            plan, summary = build_plan(Path(tmp))
+        self.assertEqual(
+            sorted(i["repo"] for i in plan["issues"]),
+            ["o/grug", "o/ledger", "o/macchina"],
+        )
+        for sha in (SHA_NEW, SHA_MID, SHA_OLD):
+            self.assertIn(sha, summary)
+
+    def test_pins_behind_the_pinned_repos_head_are_defects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_of(root, THREE_PINS)
+            (root / PINS_FILE).write_text(
+                json.dumps(
+                    {
+                        LINTER_REPO: {
+                            "head": SHA_HEAD,
+                            "behind_by": {SHA_NEW: 0, SHA_MID: 22, SHA_OLD: 31},
+                        }
+                    }
+                )
+            )
+            _, occs = scan(root)
+            entries, _ = analyse(settings(occs), read_pins(root))
+        self.assertNotIn("o/grug", entries)
+        for repo, sha, n in (("o/macchina", SHA_OLD, 31), ("o/ledger", SHA_MID, 22)):
+            (e,) = entries[repo]
+            self.assertEqual(e.kind, "defect")
+            self.assertEqual(e.target, SHA_HEAD)
+            self.assertIn(f"{n} commit(s) behind {LINTER_REPO}", e.change)
+            self.assertIn(f"`ref: {SHA_HEAD}`", e.change)
+            self.assertIn(f"`ref: {sha}`", e.change)
+
+    def test_kept_pin_behind_head_is_still_a_defect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wf = root / "o__a" / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            (wf / "h.yml").write_text(
+                hygiene_workflow(SHA_OLD, "  # fleet-drift: keep frozen")
+            )
+            pins = {LINTER_REPO: {"head": SHA_HEAD, "behind_by": {SHA_OLD: 3}}}
+            _, occs = scan(root)
+            entries, _ = analyse(settings(occs), pins)
+        self.assertEqual([e.kind for e in entries["o/a"]], ["defect"])
+
+    def test_fetch_records_how_far_each_pin_is_behind_head(self):
+        text = base64.b64encode(hygiene_workflow(SHA_OLD).encode()).decode()
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {
+                            "type": "blob",
+                            "path": ".github/workflows/h.yml",
+                            "sha": "s1",
+                        }
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": text},
+                ("GET", f"/repos/{LINTER_REPO}"): {"default_branch": "main"},
+                ("GET", f"/repos/{LINTER_REPO}/commits/main"): {"sha": SHA_HEAD},
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_OLD}...{SHA_HEAD}"): {
+                    "status": "ahead",
+                    "ahead_by": 31,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+            pins = read_pins(Path(tmp))
+        self.assertEqual(
+            pins, {LINTER_REPO: {"head": SHA_HEAD, "behind_by": {SHA_OLD: 31}}}
+        )
+        self.assertEqual({m for m, *_ in fake.calls}, {"GET"})
+
+    def test_a_pin_that_is_not_an_ancestor_of_head_is_left_to_judgment(self):
+        text = base64.b64encode(hygiene_workflow(SHA_OLD).encode()).decode()
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {"type": "blob", "path": ".github/workflows/h.yml", "sha": "s1"}
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": text},
+                ("GET", f"/repos/{LINTER_REPO}"): {"default_branch": "main"},
+                ("GET", f"/repos/{LINTER_REPO}/commits/main"): {"sha": SHA_HEAD},
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_OLD}...{SHA_HEAD}"): {
+                    "status": "diverged",
+                    "ahead_by": 4,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+            pins = read_pins(Path(tmp))
+        self.assertEqual(pins, {LINTER_REPO: {"head": SHA_HEAD, "behind_by": {}}})
+
+    def test_an_unreadable_pinned_repo_does_not_fail_the_fetch(self):
+        text = base64.b64encode(hygiene_workflow(SHA_OLD).encode()).decode()
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {"type": "blob", "path": ".github/workflows/h.yml", "sha": "s1"}
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": text},
+                ("GET", f"/repos/{LINTER_REPO}"): urllib.error.HTTPError(
+                    "u", 404, "Not Found", {}, None
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+            self.assertEqual(read_pins(Path(tmp)), {})
+        self.assertIn(LINTER_REPO, err.getvalue())
 
 
 if __name__ == "__main__":
