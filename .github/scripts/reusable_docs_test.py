@@ -138,6 +138,14 @@ class PublicAgentPolicy(unittest.TestCase):
         self.assertIn("dedicated App identity", policy)
         self.assertIn("Keep credentials out of arguments, output, logs", policy)
 
+    def test_root_agents_shared_section_matches_template(self):
+        root = Path(__file__).resolve().parents[2]
+        marker = "<!-- repo-specific below -->"
+        template = (root / "templates/public-repo/AGENTS.md").read_text()
+        synced = (root / "AGENTS.md").read_text()
+        self.assertIn(marker, synced)
+        self.assertEqual(synced.split(marker)[0], template.split(marker)[0])
+
 
 class Coverage(unittest.TestCase):
     def test_reachable_follows_local_and_slug_pinned_calls(self):
