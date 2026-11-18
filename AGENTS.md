@@ -121,10 +121,13 @@ beyond the README and an example config file to know what to change.
 
 ## Installation-token access checks
 
-For an installation token, use the installation's repository scope to
-establish whether a repository is included. Do not infer the token's
+Installation scope and repository permission booleans are different
+things. For an installation token, use the installation's repository scope
+to establish whether a repository is included. Do not infer the token's
 capabilities from repository `permissions` booleans; those values are not
-an access verdict for an installation token.
+an access verdict for an installation token. A repository response can
+show an all-false `permissions` object even when the same App writes to
+that repository successfully.
 
 Report that a write is blocked only after the exact authorized command
 returns a denial response. State the command and the denial response as
