@@ -16,6 +16,11 @@ Settings read, each keyed so the same thing in two repos compares:
 - `with:<action>:version` - a `version:` input to an action (setup-uv...).
 - `tool:<name>` - a tool pinned in a command (`ruff@0.15.10`,
   `ruff==0.15.10`, an actionlint release download).
+- `pin:<owner/repo>` - the `ref:` of an `actions/checkout` step that checks
+  out another repository (infra-public#204: the canonical hygiene linter is
+  pinned this way). `fetch` also reads how far each SHA pin is behind that
+  repository's default branch into `_pins.json`; a pin behind it is a
+  defect whatever the majority says, with the head SHA as the change.
 
 Rules, in the order they decide an entry:
 
@@ -93,6 +98,10 @@ TOOL_DOWNLOAD_RE = re.compile(
     r"\b(?:[\w.-]+)/(actionlint|shellcheck)/releases/download/v?(\d+(?:\.\d+)+)\b"
 )
 KEEP_RE = re.compile(r"#\s*fleet-drift:\s*keep\b\s*(.*)$")
+STEP_KEY_RE = re.compile(
+    r"""^\s*(repository|ref):\s*['"]?([^'"\s#]+)['"]?\s*(?:#.*)?$"""
+)
+PINS_FILE = "_pins.json"
 
 
 @dataclass(frozen=True)
@@ -209,11 +218,23 @@ def _plain_settings(
     return _tool_settings(repo, path, n, line, stripped)
 
 
+def _checkout_pin(repo: str, path: str, step: dict) -> list[Occurrence]:
+    """The `ref:` of a checkout step that names another repository, if any."""
+    if "repository" not in step or "ref" not in step:
+        return []
+    target = step["repository"][0]
+    value, n, stripped, reason = step["ref"]
+    if "$" in target or "$" in value or "{" in value:
+        return []
+    return [Occurrence(repo, f"pin:{target}", value, path, n, stripped, value, reason)]
+
+
 def extract(repo: str, path: str, text: str) -> list[Occurrence]:
     """Every shared setting in one workflow or action file."""
     out: list[Occurrence] = []
     current_action = ""
     action_indent = -1
+    step: dict[str, tuple] = {}  # `repository:`/`ref:` of the current checkout
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.rstrip()
         stripped = line.lstrip()
@@ -221,21 +242,35 @@ def extract(repo: str, path: str, text: str) -> list[Occurrence]:
             continue
         if current_action and len(line) - len(stripped) <= action_indent:
             current_action = ""
+            out.extend(_checkout_pin(repo, path, step))
+            step = {}
         keep = KEEP_RE.search(line)
         reason = (keep.group(1).strip() or "kept") if keep else ""
         m = USES_RE.match(line)
         if not m:
+            k = (
+                STEP_KEY_RE.match(line)
+                if current_action == "actions/checkout"
+                else None
+            )
+            if k:
+                step[k.group(1)] = (k.group(2), n, stripped, reason)
+                continue
             found = _plain_settings(repo, path, n, line, stripped, current_action)
             out.extend(replace(o, keep=reason) for o in found)
             continue
+        out.extend(_checkout_pin(repo, path, step))
+        step = {}
         occ = _action_occurrence(repo, path, n, m, stripped)
         if occ is None:
+            current_action = ""
             continue
         out.append(replace(occ, keep=reason))
         current_action = occ.key.split(":", 1)[1]
         # A step's keys sit right of its dash (`- uses:`), or level with a
         # bare `uses:`; a line at or left of this column ends the step.
         action_indent = len(m.group(1)) - (0 if stripped.startswith("-") else 1)
+    out.extend(_checkout_pin(repo, path, step))
     return out
 
 
@@ -317,8 +352,10 @@ def settings(occs: list[Occurrence]) -> list[Setting]:
         values_by_repo: dict[str, list[str]] = {}
         for o in group:
             values_by_repo.setdefault(o.repo, []).append(o.value)
-        if len(values_by_repo) < 2:
-            continue  # one repo carries it: nothing to compare against
+        # One repo carries it: nothing to compare against, except a `pin:`,
+        # which is also compared against its pinned repo's head.
+        if len(values_by_repo) < 2 and not key.startswith("pin:"):
+            continue
         per_repo = {r: repo_value(v, key) for r, v in sorted(values_by_repo.items())}
         counts = Counter(per_repo.values()).most_common()
         majority = None
@@ -388,16 +425,47 @@ def _without_majority(
     )
 
 
+def _against_head(o: Occurrence, pins: dict) -> Entry | str | None:
+    """For a `pin:` occurrence: a defect when `_pins.json` says it is behind
+    the pinned repo's head, None when it is at head, AHEAD (meaning "not
+    decided here") when there is no reading for it."""
+    target = o.key.split(":", 1)[1]
+    info = pins.get(target) or {}
+    behind = (info.get("behind_by") or {}).get(o.value)
+    if not isinstance(behind, int):
+        return AHEAD
+    if behind == 0:
+        return None
+    head = info["head"]
+    return Entry(
+        "defect",
+        o,
+        head,
+        f"{behind} commit(s) behind {target} `{head}`: "
+        f"`{o.text}` -> `{o.text.replace(o.value, head, 1)}`",
+    )
+
+
 def analyse(
-    sets: list[Setting],
+    sets: list[Setting], pins: dict | None = None
 ) -> tuple[dict[str, list[Entry]], list[tuple[Setting, Occurrence]]]:
-    """Per-repo entries, plus every occurrence that is ahead of the majority."""
+    """Per-repo entries, plus every occurrence that is ahead of the majority.
+
+    `pins` is `_pins.json` from `fetch`: a `pin:` setting it has a reading
+    for is judged against the pinned repo's head, not the majority.
+    """
     entries: dict[str, list[Entry]] = {}
     ahead: list[tuple[Setting, Occurrence]] = []
     for s in sets:
         values = sorted(set(s.per_repo.values()))
         best = newest(values, s.key)
         for o in s.occurrences:
+            if s.key.startswith("pin:") and pins:
+                got = _against_head(o, pins)
+                if got != AHEAD:
+                    if isinstance(got, Entry):
+                        entries.setdefault(o.repo, []).append(got)
+                    continue
             if s.majority is not None:
                 got = _against_majority(s, o)
             else:
@@ -502,7 +570,7 @@ def render_issue(repo: str, items: list[Entry]) -> str:
 def build_plan(root: Path) -> tuple[dict, str]:
     repos, occs = scan(root)
     sets = settings(occs)
-    entries, ahead = analyse(sets)
+    entries, ahead = analyse(sets, read_pins(root))
     issues = [
         {"repo": r, "title": TITLE_PREFIX + r, "body": render_issue(r, entries[r])}
         for r in sorted(entries)
@@ -562,6 +630,53 @@ def fetch(gh: GitHub, repos: list[str], out: Path) -> None:
             target = dest / item["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(blob["content"]))
+    fetch_pins(gh, out)
+
+
+def read_pins(root: Path) -> dict:
+    """`_pins.json` under a fetched root, or {} when fetch wrote none."""
+    path = root / PINS_FILE
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def fetch_pins(gh: GitHub, out: Path) -> None:
+    """How far each SHA `pin:` in the fetched files is behind its repo's head.
+
+    One reading per pinned repository: its default-branch head, and for each
+    pinned SHA the number of commits head has that the SHA lacks. Only a SHA
+    that is an ancestor of head (compare status `ahead` or `identical`) gets
+    a number; any other stays unread and is left to the majority rules. A
+    repository the token cannot read is named on stderr and skipped, so one
+    private pin never fails the report.
+    """
+    _, occs = scan(out)
+    wanted: dict[str, set[str]] = {}
+    for o in occs:
+        if o.key.startswith("pin:") and SHA_RE.match(o.value):
+            wanted.setdefault(o.key.split(":", 1)[1], set()).add(o.value)
+    pins: dict[str, dict] = {}
+    q = urllib.parse.quote
+    for target in sorted(wanted):
+        try:
+            branch = gh.call("GET", f"/repos/{target}")["default_branch"]
+            head = gh.call("GET", f"/repos/{target}/commits/{q(branch, safe='')}")[
+                "sha"
+            ]
+            behind: dict[str, int] = {}
+            for sha in sorted(wanted[target]):
+                cmp = gh.call("GET", f"/repos/{target}/compare/{sha}...{head}")
+                if cmp.get("status") in ("ahead", "identical"):
+                    behind[sha] = int(cmp.get("ahead_by", 0))
+        except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
+            print(f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr)
+            continue
+        pins[target] = {"head": head, "behind_by": behind}
+    if pins:
+        (out / PINS_FILE).write_text(
+            json.dumps(pins, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
 
 def _open_drift_issues(gh: GitHub, issue_repo: str) -> dict[str, int]:
