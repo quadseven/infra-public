@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Fixture suite for reusable_docs.py (infra-public#137).
 
+PublicAgentPolicy also guards the "Installation-token access checks"
+section of templates/public-repo/AGENTS.md and the root AGENTS.md
+(infra-public#201): the policy must tell installation scope apart from
+repository `permissions` booleans, require the exact authorized command
+and its denial response before a write is reported blocked, and keep the
+dedicated-App-only identity and secret handling rules. A sentence that
+reads permission booleans as an access verdict fails the suite.
+
 Python stdlib only (unittest), matching the other guard suites here.
 
 Run: python3 .github/scripts/reusable_docs_test.py
@@ -8,6 +16,7 @@ Run: python3 .github/scripts/reusable_docs_test.py
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,6 +135,68 @@ class Ascii(unittest.TestCase):
     def test_unknown_non_ascii_is_an_error(self):
         with self.assertRaises(ParseError):
             to_ascii("caf\u00e9", "x")
+
+
+POLICY_FILES = ("templates/public-repo/AGENTS.md", "AGENTS.md")
+
+# A sentence that turns repository `permissions` booleans back into an
+# access verdict for an installation token: the rule this guard removed.
+# A dot followed by a word character (`permissions.push`) is not a
+# sentence end.
+UNSUPPORTED_INFERENCE = re.compile(
+    r"`?permissions(?:[^.]|\.(?=\w))*\b(?:means|shows|proves|indicates|confirms)\b"
+    r"(?:[^.]|\.(?=\w))*"
+    r"\b(?:access|denied|denial|blocked|cannot write|read-only)\b",
+    re.IGNORECASE,
+)
+
+
+def unsupported_inferences(policy: str) -> list[str]:
+    """Sentences in `policy` that read permission booleans as an access verdict."""
+    flat = " ".join(policy.split())
+    return [m.group(0) for m in UNSUPPORTED_INFERENCE.finditer(flat)]
+
+
+class PublicAgentPolicy(unittest.TestCase):
+    def policies(self) -> dict[str, str]:
+        root = Path(__file__).resolve().parents[2]
+        return {name: " ".join((root / name).read_text().split()) for name in POLICY_FILES}
+
+    def test_installation_token_access_guidance_uses_scope_and_observed_denial(self):
+        required = (
+            "Installation scope and repository permission booleans are different things.",
+            "use the installation's repository scope to establish whether a repository is included",
+            "Do not infer the token's capabilities from repository `permissions` booleans",
+            "Report that a write is blocked only after the exact authorized command returns a denial response.",
+            "State the command and the denial response as evidence.",
+            "Do not probe access by creating credentials, changing grants, or falling back to a personal identity.",
+            "Use only the dedicated App identity.",
+            "Keep credentials out of arguments, output, logs",
+        )
+        for name, policy in self.policies().items():
+            for phrase in required:
+                with self.subTest(file=name, phrase=phrase):
+                    self.assertIn(phrase, policy)
+
+    def test_policy_does_not_read_permission_booleans_as_an_access_verdict(self):
+        for name, policy in self.policies().items():
+            with self.subTest(file=name):
+                self.assertEqual(unsupported_inferences(policy), [])
+
+    def test_the_inference_check_catches_the_removed_rule(self):
+        removed_rule = (
+            "Check the repository response first. If `permissions.push` is\n"
+            "false, that shows the token is denied write access; report it as blocked."
+        )
+        self.assertEqual(len(unsupported_inferences(removed_rule)), 1)
+
+    def test_root_agents_shared_section_matches_template(self):
+        root = Path(__file__).resolve().parents[2]
+        marker = "<!-- repo-specific below -->"
+        template = (root / "templates/public-repo/AGENTS.md").read_text()
+        synced = (root / "AGENTS.md").read_text()
+        self.assertIn(marker, synced)
+        self.assertEqual(synced.split(marker)[0], template.split(marker)[0])
 
 
 class Coverage(unittest.TestCase):
