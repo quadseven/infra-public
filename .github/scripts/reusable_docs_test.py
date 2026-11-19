@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Fixture suite for reusable_docs.py (infra-public#137).
 
+PublicAgentPolicy also guards the "Installation-token access checks"
+section of templates/public-repo/AGENTS.md and the root AGENTS.md
+(infra-public#201): the policy must tell installation scope apart from
+repository `permissions` booleans, require the exact authorized command
+and its denial response before a write is reported blocked, and keep the
+dedicated-App-only identity and secret handling rules. A sentence that
+reads permission booleans as an access verdict fails the suite.
+
 Python stdlib only (unittest), matching the other guard suites here.
 
 Run: python3 .github/scripts/reusable_docs_test.py
