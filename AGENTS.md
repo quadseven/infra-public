@@ -178,6 +178,8 @@ Several AI brains work this repo beside the operator: Claude Code, Muse, Dot and
 
 **Human line.** People do: permanent deletion of records, creating, rotating or entering credentials, access grants, new spending, accepting terms. People decide: another brain's role and the fleet goal text. A second brain must agree, in writing, to clear a lane demotion, lift another brain's hold, or reopen a sound close. Everything else needs nobody. Ask with `needs:human` and one exact question. A relayed yes is not a yes. Never print a credential.
 
+**Writing on GitHub.** Issue, pull request and comment bodies are never hard-wrapped: GitHub renders every newline in them as a line break, so a sentence wrapped at 72 columns breaks mid-line. Write one paragraph per line with a blank line between paragraphs; lists, tables and code blocks keep their own lines. Commit messages may stay wrapped, but a commit body reused in a pull request or issue is unwrapped first (`scripts/lib/unwrap_prose.py` in `quadseven/claude-stuff` does it).
+
 **When stuck.** Labels and stages: `docs/BRAIN.md` in `quadseven/loom`. Reusable workflows: `docs/reusables.md` in `quadseven/infra-public`. Chief's rules and every `/grug` verb: the README in `quadseven/grug`, whose `make chief-check` tests a body before posting. Fleet log: issue 30 in `quadseven/loom`. File a factory fault there as `loom:factory`. Poll `gh` at most once per 5 minutes.
 
 <!-- Everything above the next line is synced from quadseven/infra-public and replaced on every sync. Put this repo's own content below it. -->
