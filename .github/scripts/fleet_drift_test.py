@@ -21,12 +21,15 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import fleet_drift  # noqa: E402
 from fleet_drift import (  # noqa: E402
     PINS_FILE,
     GitHub,
@@ -852,6 +855,175 @@ class CrossRepoRefPins(unittest.TestCase):
             fleet_of(root, {"o/a": SHA_OLD})
             with self.assertRaises(RuntimeError):
                 fetch_pins(GitHub("tok", fake), root)
+
+
+def rate_limited(code=429, headers=None, reason="Too Many Requests"):
+    return urllib.error.HTTPError("u", code, reason, headers or {}, None)
+
+
+class SequencedAPI(FakeAPI):
+    """FakeAPI whose answer for a key may be a list consumed one call at a time."""
+
+    def __init__(self, answers, sequences):
+        super().__init__(answers)
+        self.sequences = {k: list(v) for k, v in sequences.items()}
+
+    def __call__(self, req, timeout):
+        key = (req.get_method(), req.full_url.replace("https://api.github.com", ""))
+        with self._lock:
+            seq = self.sequences.get(key)
+            nxt = seq.pop(0) if seq else None
+        if nxt is None:
+            return super().__call__(req, timeout)
+        with self._lock:
+            self.calls.append((key[0], key[1], None, timeout))
+        if isinstance(nxt, Exception):
+            raise nxt
+        return FakeResponse(json.dumps(nxt).encode())
+
+
+class RateLimits(unittest.TestCase):
+    def test_429_with_retry_after_is_retried_then_succeeds(self):
+        fake = SequencedAPI(
+            {},
+            {
+                ("GET", "/repos/o/a"): [
+                    rate_limited(429, {"Retry-After": "7"}),
+                    {"default_branch": "main"},
+                ]
+            },
+        )
+        waits = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = GitHub("tok", fake, sleep=waits.append).call("GET", "/repos/o/a")
+        self.assertEqual(got, {"default_branch": "main"})
+        self.assertEqual(waits, [7.0])
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_403_rate_limit_waits_for_reset_capped(self):
+        reset = str(int(time.time()) + 3600)
+        err = rate_limited(
+            403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset}, "Forbidden"
+        )
+        fake = SequencedAPI({}, {("GET", "/repos/o/a"): [err, {"ok": 1}]})
+        waits = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            GitHub("tok", fake, sleep=waits.append).call("GET", "/repos/o/a")
+        self.assertEqual(waits, [float(fleet_drift.RATE_LIMIT_MAX_WAIT)])
+
+    def test_retries_are_bounded_then_the_error_is_raised(self):
+        fake = FakeAPI({("GET", "/repos/o/a"): rate_limited(429, {"Retry-After": "1"})})
+        waits = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(urllib.error.HTTPError):
+                GitHub("tok", fake, sleep=waits.append).call("GET", "/repos/o/a")
+        self.assertEqual(len(waits), fleet_drift.RATE_LIMIT_RETRIES)
+        self.assertEqual(len(fake.calls), fleet_drift.RATE_LIMIT_RETRIES + 1)
+
+    def test_a_permission_403_is_not_retried(self):
+        fake = FakeAPI({("GET", "/repos/o/a"): rate_limited(403, {}, "Forbidden")})
+        waits = []
+        with self.assertRaises(urllib.error.HTTPError):
+            GitHub("tok", fake, sleep=waits.append).call("GET", "/repos/o/a")
+        self.assertEqual(waits, [])
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_a_rate_limited_pin_compare_fails_the_run_not_drops_the_target(self):
+        fake = FakeAPI(
+            {
+                ("GET", f"/repos/{LINTER_REPO}"): {"default_branch": "main"},
+                ("GET", f"/repos/{LINTER_REPO}/commits/main"): {"sha": SHA_HEAD},
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_OLD}...{SHA_HEAD}"): (
+                    rate_limited(403, {"x-ratelimit-remaining": "0"}, "Forbidden")
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_of(root, {"o/a": SHA_OLD})
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    fetch_pins(GitHub("tok", fake, sleep=lambda _s: None), root)
+            self.assertFalse((root / PINS_FILE).exists())
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_a_rate_limited_pin_head_read_fails_the_run_not_drops_the_target(self):
+        fake = FakeAPI(
+            {
+                ("GET", f"/repos/{LINTER_REPO}"): rate_limited(
+                    429, {"Retry-After": "1"}
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_of(root, {"o/a": SHA_OLD})
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(urllib.error.HTTPError):
+                    fetch_pins(GitHub("tok", fake, sleep=lambda _s: None), root)
+            self.assertFalse((root / PINS_FILE).exists())
+
+
+class Workers(unittest.TestCase):
+    def test_fetch_uses_four_workers(self):
+        self.assertEqual(fleet_drift.FETCH_WORKERS, 4)
+        seen = []
+        real = fleet_drift.concurrent.futures.ThreadPoolExecutor
+
+        def spy(max_workers):
+            seen.append(max_workers)
+            return real(max_workers=max_workers)
+
+        content = base64.b64encode(b"name: ci\n").decode()
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {"type": "blob", "path": ".github/workflows/c.yml", "sha": "s1"}
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": content},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                fleet_drift.concurrent.futures, "ThreadPoolExecutor", spy
+            ):
+                fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+        self.assertEqual(seen, [4])
+
+    def test_first_failure_cancels_queued_blob_fetches(self):
+        release = threading.Event()
+        tree = [
+            {
+                "type": "blob",
+                "path": f".github/workflows/w{i:02d}.yml",
+                "sha": f"s{i:02d}",
+            }
+            for i in range(20)
+        ]
+        content = base64.b64encode(b"name: ci\n").decode()
+        answers = {
+            ("GET", "/repos/o/a"): {"default_branch": "main"},
+            ("GET", "/repos/o/a/git/trees/main"): {"tree": tree},
+            ("GET", "/repos/o/a/git/blobs/s00"): RuntimeError("boom"),
+        }
+        for i in range(1, 20):
+            answers[("GET", f"/repos/o/a/git/blobs/s{i:02d}")] = {"content": content}
+
+        def on_call(_method, path):
+            if path.endswith("/blobs/s00"):
+                threading.Timer(0.2, release.set).start()
+            elif "/blobs/" in path:
+                release.wait(5)
+
+        fake = FakeAPI(answers, on_call=on_call)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+        blobs = [p for _, p, *_ in fake.calls if "/blobs/" in p]
+        self.assertLess(len(blobs), 20)
 
 
 if __name__ == "__main__":
