@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -73,6 +74,7 @@ from typing import Callable
 
 API = "https://api.github.com"
 HTTP_TIMEOUT = 30
+FETCH_WORKERS = 8
 TITLE_PREFIX = "Fleet drift: "
 LABEL = "fleet-drift"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -612,10 +614,16 @@ class GitHub:
 WANTED_RE = re.compile(r"^\.github/(workflows/[^/]+\.ya?ml|actions/.+/action\.ya?ml)$")
 
 
+def _fetch_blob(gh: GitHub, repo: str, sha: str) -> bytes:
+    blob = gh.call("GET", f"/repos/{repo}/git/blobs/{sha}")
+    return base64.b64decode(blob["content"])
+
+
 def fetch(gh: GitHub, repos: list[str], out: Path) -> None:
     """Copy each repo's workflow and action files from its default branch. Read-only."""
+    q = urllib.parse.quote
+    jobs: list[tuple[str, Path, str]] = []
     for repo in repos:
-        q = urllib.parse.quote
         meta = gh.call("GET", f"/repos/{repo}")
         branch = meta["default_branch"]
         tree = gh.call(
@@ -623,13 +631,23 @@ def fetch(gh: GitHub, repos: list[str], out: Path) -> None:
         )
         dest = out / repo_to_dir(repo)
         dest.mkdir(parents=True, exist_ok=True)
-        for item in tree.get("tree", []):
-            if item.get("type") != "blob" or not WANTED_RE.match(item.get("path", "")):
-                continue
-            blob = gh.call("GET", f"/repos/{repo}/git/blobs/{item['sha']}")
-            target = dest / item["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(base64.b64decode(blob["content"]))
+        items = [
+            item
+            for item in tree.get("tree", [])
+            if item.get("type") == "blob" and WANTED_RE.match(item.get("path", ""))
+        ]
+        for item in sorted(items, key=lambda i: i["path"]):
+            jobs.append((repo, dest / item["path"], item["sha"]))
+    if jobs:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+            futures = [
+                (target, pool.submit(_fetch_blob, gh, repo, sha))
+                for repo, target, sha in jobs
+            ]
+            for target, fut in futures:
+                content = fut.result()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
     fetch_pins(gh, out)
 
 
@@ -639,6 +657,19 @@ def read_pins(root: Path) -> dict:
     if not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _target_head(gh: GitHub, target: str) -> str:
+    q = urllib.parse.quote
+    branch = gh.call("GET", f"/repos/{target}")["default_branch"]
+    return gh.call("GET", f"/repos/{target}/commits/{q(branch, safe='')}")["sha"]
+
+
+def _compare_pin(gh: GitHub, target: str, sha: str, head: str) -> int | None:
+    cmp = gh.call("GET", f"/repos/{target}/compare/{sha}...{head}")
+    if cmp.get("status") in ("ahead", "identical"):
+        return int(cmp.get("ahead_by", 0))
+    return None
 
 
 def fetch_pins(gh: GitHub, out: Path) -> None:
@@ -656,23 +687,42 @@ def fetch_pins(gh: GitHub, out: Path) -> None:
     for o in occs:
         if o.key.startswith("pin:") and SHA_RE.match(o.value):
             wanted.setdefault(o.key.split(":", 1)[1], set()).add(o.value)
+    if not wanted:
+        return
     pins: dict[str, dict] = {}
-    q = urllib.parse.quote
-    for target in sorted(wanted):
-        try:
-            branch = gh.call("GET", f"/repos/{target}")["default_branch"]
-            head = gh.call("GET", f"/repos/{target}/commits/{q(branch, safe='')}")[
-                "sha"
+    targets = sorted(wanted)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        head_futs = {
+            target: pool.submit(_target_head, gh, target) for target in targets
+        }
+        heads: dict[str, str] = {}
+        for target in targets:
+            try:
+                heads[target] = head_futs[target].result()
+            except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
+                print(
+                    f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr
+                )
+        cmp_futs = {
+            target: [
+                (sha, pool.submit(_compare_pin, gh, target, sha, heads[target]))
+                for sha in sorted(wanted[target])
             ]
+            for target in sorted(heads)
+        }
+        for target in sorted(heads):
             behind: dict[str, int] = {}
-            for sha in sorted(wanted[target]):
-                cmp = gh.call("GET", f"/repos/{target}/compare/{sha}...{head}")
-                if cmp.get("status") in ("ahead", "identical"):
-                    behind[sha] = int(cmp.get("ahead_by", 0))
-        except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
-            print(f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr)
-            continue
-        pins[target] = {"head": head, "behind_by": behind}
+            try:
+                for sha, fut in cmp_futs[target]:
+                    count = fut.result()
+                    if count is not None:
+                        behind[sha] = count
+            except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
+                print(
+                    f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr
+                )
+                continue
+            pins[target] = {"head": heads[target], "behind_by": behind}
     if pins:
         (out / PINS_FILE).write_text(
             json.dumps(pins, indent=2, sort_keys=True) + "\n", encoding="utf-8"

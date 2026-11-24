@@ -20,6 +20,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -34,6 +35,7 @@ from fleet_drift import (  # noqa: E402
     compare,
     extract,
     fetch,
+    fetch_pins,
     file_issues,
     main,
     read_pins,
@@ -281,14 +283,19 @@ class FakeResponse(io.BytesIO):
 class FakeAPI:
     """Records every request; answers from a table keyed by (method, path)."""
 
-    def __init__(self, answers):
+    def __init__(self, answers, on_call=None):
         self.answers = answers
         self.calls = []
+        self._lock = threading.Lock()
+        self._on_call = on_call
 
     def __call__(self, req, timeout):
         path = req.full_url.replace("https://api.github.com", "")
         body = json.loads(req.data) if req.data else None
-        self.calls.append((req.get_method(), path, body, timeout))
+        with self._lock:
+            self.calls.append((req.get_method(), path, body, timeout))
+        if self._on_call is not None:
+            self._on_call(req.get_method(), path)
         ans = self.answers.get((req.get_method(), path.split("?")[0]))
         if isinstance(ans, Exception):
             raise ans
@@ -410,6 +417,96 @@ class Fetching(unittest.TestCase):
             ["o__a/.github/actions/setup/action.yml", "o__a/.github/workflows/ci.yml"],
         )
         self.assertEqual({m for m, *_ in fake.calls}, {"GET"})
+
+    def test_fetch_downloads_blobs_concurrently_with_deterministic_output(self):
+        c1 = base64.b64encode(b"name: ci\n").decode()
+        c2 = base64.b64encode(b"name: lint\n").decode()
+        c3 = base64.b64encode(b"name: setup\n").decode()
+        barrier = threading.Barrier(2, timeout=5)
+
+        def on_call(_method, path):
+            if path.endswith(("/blobs/s1", "/blobs/s2")):
+                barrier.wait()
+
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {
+                            "type": "blob",
+                            "path": ".github/workflows/lint.yml",
+                            "sha": "s2",
+                        },
+                        {
+                            "type": "blob",
+                            "path": ".github/workflows/ci.yml",
+                            "sha": "s1",
+                        },
+                    ]
+                },
+                ("GET", "/repos/o/b"): {"default_branch": "main"},
+                ("GET", "/repos/o/b/git/trees/main"): {
+                    "tree": [
+                        {
+                            "type": "blob",
+                            "path": ".github/actions/setup/action.yml",
+                            "sha": "s3",
+                        },
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": c1},
+                ("GET", "/repos/o/a/git/blobs/s2"): {"content": c2},
+                ("GET", "/repos/o/b/git/blobs/s3"): {"content": c3},
+            },
+            on_call=on_call,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fetch(GitHub("tok", fake), ["o/a", "o/b"], root)
+            got = {
+                p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
+                for p in sorted(root.rglob("*"))
+                if p.is_file()
+            }
+        self.assertEqual(
+            got,
+            {
+                "o__a/.github/workflows/ci.yml": "name: ci\n",
+                "o__a/.github/workflows/lint.yml": "name: lint\n",
+                "o__b/.github/actions/setup/action.yml": "name: setup\n",
+            },
+        )
+
+    def test_fetch_propagates_blob_errors_cleanly(self):
+        c1 = base64.b64encode(b"name: ci\n").decode()
+        boom = urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        fake = FakeAPI(
+            {
+                ("GET", "/repos/o/a"): {"default_branch": "main"},
+                ("GET", "/repos/o/a/git/trees/main"): {
+                    "tree": [
+                        {
+                            "type": "blob",
+                            "path": ".github/workflows/ci.yml",
+                            "sha": "s1",
+                        },
+                        {
+                            "type": "blob",
+                            "path": ".github/workflows/lint.yml",
+                            "sha": "s2",
+                        },
+                    ]
+                },
+                ("GET", "/repos/o/a/git/blobs/s1"): {"content": c1},
+                ("GET", "/repos/o/a/git/blobs/s2"): boom,
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
+        self.assertEqual(ctx.exception.code, 500)
+        ctx.exception.close()
 
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
@@ -702,6 +799,59 @@ class CrossRepoRefPins(unittest.TestCase):
                 fetch(GitHub("tok", fake), ["o/a"], Path(tmp))
             self.assertEqual(read_pins(Path(tmp)), {})
         self.assertIn(LINTER_REPO, err.getvalue())
+
+    def test_fetch_pins_compares_concurrently_with_deterministic_output(self):
+        barrier = threading.Barrier(2, timeout=5)
+
+        def on_call(_method, path):
+            if "/compare/" in path:
+                barrier.wait()
+
+        fake = FakeAPI(
+            {
+                ("GET", f"/repos/{LINTER_REPO}"): {"default_branch": "main"},
+                ("GET", f"/repos/{LINTER_REPO}/commits/main"): {"sha": SHA_HEAD},
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_OLD}...{SHA_HEAD}"): {
+                    "status": "ahead",
+                    "ahead_by": 31,
+                },
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_MID}...{SHA_HEAD}"): {
+                    "status": "ahead",
+                    "ahead_by": 22,
+                },
+            },
+            on_call=on_call,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_of(root, {"o/a": SHA_OLD, "o/b": SHA_MID})
+            fetch_pins(GitHub("tok", fake), root)
+            raw = (root / PINS_FILE).read_text(encoding="utf-8")
+            pins = read_pins(root)
+        expected = {
+            LINTER_REPO: {
+                "head": SHA_HEAD,
+                "behind_by": {SHA_MID: 22, SHA_OLD: 31},
+            }
+        }
+        self.assertEqual(pins, expected)
+        self.assertEqual(raw, json.dumps(expected, indent=2, sort_keys=True) + "\n")
+
+    def test_fetch_pins_propagates_unexpected_compare_errors(self):
+        fake = FakeAPI(
+            {
+                ("GET", f"/repos/{LINTER_REPO}"): {"default_branch": "main"},
+                ("GET", f"/repos/{LINTER_REPO}/commits/main"): {"sha": SHA_HEAD},
+                ("GET", f"/repos/{LINTER_REPO}/compare/{SHA_OLD}...{SHA_HEAD}"): (
+                    RuntimeError("boom")
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_of(root, {"o/a": SHA_OLD})
+            with self.assertRaises(RuntimeError):
+                fetch_pins(GitHub("tok", fake), root)
 
 
 if __name__ == "__main__":
