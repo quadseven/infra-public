@@ -60,21 +60,27 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import contextlib
 import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 API = "https://api.github.com"
 HTTP_TIMEOUT = 30
-FETCH_WORKERS = 8
+# Four concurrent requests on one token stays clear of GitHub's secondary
+# (concurrency) rate limit; a limit that still trips is retried in call().
+FETCH_WORKERS = 4
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_MAX_WAIT = 60
 TITLE_PREFIX = "Fleet drift: "
 LABEL = "fleet-drift"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -585,14 +591,77 @@ def build_plan(root: Path) -> tuple[dict, str]:
 # ---------------------------------------------------------------- GitHub I/O
 
 
-class GitHub:
-    """A minimal REST client. `opener` is swappable so tests never touch the network."""
+def _headers(e: urllib.error.HTTPError) -> dict[str, str]:
+    """Response headers of an HTTP error, keys lower-cased."""
+    return {k.lower(): v for k, v in (e.headers or {}).items()}
 
-    def __init__(self, token: str, opener: Callable | None = None):
+
+def is_rate_limited(e: BaseException) -> bool:
+    """A 429, or a 403 that GitHub marks as a primary or secondary rate limit.
+
+    A 403 with no rate-limit header and no rate-limit message is a
+    permission refusal, which is not retried.
+    """
+    if not isinstance(e, urllib.error.HTTPError):
+        return False
+    if e.code == 429:
+        return True
+    if e.code != 403:
+        return False
+    headers = _headers(e)
+    if "retry-after" in headers or headers.get("x-ratelimit-remaining") == "0":
+        return True
+    return "rate limit" in str(e.reason).lower()
+
+
+def rate_limit_wait(e: urllib.error.HTTPError, attempt: int, now: float) -> float:
+    """Seconds to wait before retrying a rate-limited call, at most RATE_LIMIT_MAX_WAIT.
+
+    `Retry-After` wins, then `x-ratelimit-reset` (epoch seconds), then an
+    exponential fallback.
+    """
+    headers = _headers(e)
+    wait = float(2 ** (attempt + 1))
+    with contextlib.suppress(ValueError):
+        if "retry-after" in headers:
+            wait = float(headers["retry-after"])
+        elif "x-ratelimit-reset" in headers:
+            wait = float(headers["x-ratelimit-reset"]) - now + 1
+    return min(max(wait, 1.0), RATE_LIMIT_MAX_WAIT)
+
+
+class GitHub:
+    """A minimal REST client. `opener` and `sleep` are swappable so tests never
+    touch the network or wait on the clock."""
+
+    def __init__(
+        self,
+        token: str,
+        opener: Callable | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.token = token
         self.opener = opener or urllib.request.urlopen
+        self.sleep = sleep
 
     def call(self, method: str, path: str, body: dict | None = None):
+        """One API request; a rate-limit response is retried RATE_LIMIT_RETRIES times."""
+        attempt = 0
+        while True:
+            try:
+                return self._call_once(method, path, body)
+            except urllib.error.HTTPError as e:
+                if attempt >= RATE_LIMIT_RETRIES or not is_rate_limited(e):
+                    raise
+                wait = rate_limit_wait(e, attempt, time.time())
+                print(
+                    f"fleet-drift: rate limited on {method} {path}, retry in {wait:.0f}s",
+                    file=sys.stderr,
+                )
+                self.sleep(wait)
+                attempt += 1
+
+    def _call_once(self, method: str, path: str, body: dict | None):
         if not path.startswith("/"):
             raise ValueError(f"not an API path: {path!r}")
         # API + an absolute path: the scheme is always https, never file: or
@@ -612,6 +681,18 @@ class GitHub:
 
 
 WANTED_RE = re.compile(r"^\.github/(workflows/[^/]+\.ya?ml|actions/.+/action\.ya?ml)$")
+
+
+@contextlib.contextmanager
+def _pool() -> Iterator[concurrent.futures.ThreadPoolExecutor]:
+    """A FETCH_WORKERS thread pool that cancels its queued work on the first failure."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS)
+    try:
+        yield pool
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
 
 
 def _fetch_blob(gh: GitHub, repo: str, sha: str) -> bytes:
@@ -639,7 +720,7 @@ def fetch(gh: GitHub, repos: list[str], out: Path) -> None:
         for item in sorted(items, key=lambda i: i["path"]):
             jobs.append((repo, dest / item["path"], item["sha"]))
     if jobs:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        with _pool() as pool:
             futures = [
                 (target, pool.submit(_fetch_blob, gh, repo, sha))
                 for repo, target, sha in jobs
@@ -672,6 +753,18 @@ def _compare_pin(gh: GitHub, target: str, sha: str, head: str) -> int | None:
     return None
 
 
+def _skip_unreadable(target: str, e: Exception) -> None:
+    """Name an unreadable pinned repo on stderr, or re-raise a rate limit.
+
+    A rate-limited read says nothing about the repo, and skipping it would
+    drop its pins from `_pins.json` so drift reads clean; the run fails
+    instead.
+    """
+    if is_rate_limited(e):
+        raise e
+    print(f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr)
+
+
 def fetch_pins(gh: GitHub, out: Path) -> None:
     """How far each SHA `pin:` in the fetched files is behind its repo's head.
 
@@ -680,7 +773,8 @@ def fetch_pins(gh: GitHub, out: Path) -> None:
     that is an ancestor of head (compare status `ahead` or `identical`) gets
     a number; any other stays unread and is left to the majority rules. A
     repository the token cannot read is named on stderr and skipped, so one
-    private pin never fails the report.
+    private pin never fails the report; a rate limit that outlasts the
+    retries in `GitHub.call` fails it.
     """
     _, occs = scan(out)
     wanted: dict[str, set[str]] = {}
@@ -691,7 +785,7 @@ def fetch_pins(gh: GitHub, out: Path) -> None:
         return
     pins: dict[str, dict] = {}
     targets = sorted(wanted)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+    with _pool() as pool:
         head_futs = {
             target: pool.submit(_target_head, gh, target) for target in targets
         }
@@ -700,9 +794,7 @@ def fetch_pins(gh: GitHub, out: Path) -> None:
             try:
                 heads[target] = head_futs[target].result()
             except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
-                print(
-                    f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr
-                )
+                _skip_unreadable(target, e)
         cmp_futs = {
             target: [
                 (sha, pool.submit(_compare_pin, gh, target, sha, heads[target]))
@@ -718,9 +810,7 @@ def fetch_pins(gh: GitHub, out: Path) -> None:
                     if count is not None:
                         behind[sha] = count
             except (urllib.error.URLError, KeyError, TypeError, ValueError) as e:
-                print(
-                    f"fleet-drift: cannot read pins of {target}: {e}", file=sys.stderr
-                )
+                _skip_unreadable(target, e)
                 continue
             pins[target] = {"head": heads[target], "behind_by": behind}
     if pins:
