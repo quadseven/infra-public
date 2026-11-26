@@ -162,6 +162,8 @@ Several AI brains work this repo beside the operator: Claude Code, Muse, Dot and
 
 - Shared workflows come from `quadseven/infra-public`, pinned by full SHA.
 - Leak scan: reads the diff and the PR title and body, and a scan that cannot run is red. It has 9 rules: tailnet hosts, tailnet IPs, private-range IPs, server names, node names, user paths, MAC addresses, the stray mention, and cross-repo refs. A ref of the form `name#N` or `owner/name#N` to any other repo fails, public or not, unless the leak scan's `allowed-repo-refs` input lists that repo. Bare `#N` means this repo. A line with `leak-guard-allow` is exempt and visible in review; use it only for a real false positive.
+- Leak scan commit history: `leak-scan` inspects individual commit patches and messages as well as the PR diff, so clearing a hit introduced in an earlier commit requires amending or rebasing that commit rather than adding a follow-up fix commit.
+- Bare stdlib CI tests: repos with bare stdlib `python3 -m unittest` CI jobs run without third-party virtualenv packages (such as `PyYAML` or `urllib3`), so test stdlib automation modules with bare `python3 -m unittest` before pushing.
 - Trust gate: a job on self-hosted workflows that admits collaborators only and can reject an App token. A repo with no self-hosted jobs has none.
 - Other guards, where a repo calls them: workflow hygiene, size ratchet, CI config freshness, and close completeness, which reopens an issue closed with unticked boxes.
 - Agent Apps cannot push `.github/workflows` changes.
