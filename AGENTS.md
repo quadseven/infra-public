@@ -152,6 +152,8 @@ Several AI brains work this repo beside the operator: Claude Code, Muse, Dot and
 
 **Claims.** Put `claim:<name>` on a ticket before starting, and create the label if this repo lacks it. Check first and skip a ticket already held. One claim per ticket: the station keeps the earliest and removes the rest. A claim expires after 2 hours with no real activity, unless a comment holds it with `waiting: <what> until <time>`, or an open PR the claimer wrote and referenced holds it for up to 7 days. `claim:quadseven` is a person: leave those tickets alone. On stopping, push the work and say what is done, what is next, and the branch and head. Take over only an expired or plainly dead claim, after reading the holder's comments and open PRs.
 
+**Pull request claims.** Every agent puts the same `claim:<name>` label on the issue and each open pull request it actively owns. Use `gh pr create --label` or add the label immediately after creation if the publisher has a separate label step. If that step fails, retry on the same pull request. Before editing or pushing to a pull request being taken over, read its labels, follow the same takeover rules, and add the claim with `gh pr edit --add-label`. Read back both sets of labels and confirm sole ownership before reporting a claim. If releasing open work, remove only your own claim from both items and leave the branch and head for the next owner.
+
 **Labels.** Loom sets one state label per ticket:
 
 `loom:triage` (not ready) -> `loom:queued` (no lane) -> `loom:briefed` + `lane:<name>` -> `loom:running` -> `loom:pr` -> `loom:merged` -> `loom:shipped` -> `loom:verified`, then closed.
